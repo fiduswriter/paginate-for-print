@@ -32,23 +32,29 @@ function flowElement(node, container) {
     
     function fillPage (node) {
 
-        var lastPage = createPage(), 
-            coordinates = lastPage.getBoundingClientRect(), 
-            bottomRightX = coordinates.right, 
-            bottomRightY = coordinates.bottom;
+        var lastPage = createPage(), coordinates, bottomLeftX, bottomLeftY;
+
         
             lastPage.appendChild(node);
-
-            range = caretRange(bottomRightX-1, bottomRightY-1); 
+            lastPage.scrollIntoView(true);
+            coordinates = lastPage.getBoundingClientRect(); 
+            bottomLeftX = coordinates.left; 
+            bottomLeftY = coordinates.bottom;          
+            
+            
+            range = caretRange(bottomLeftX+1, bottomLeftY-1); 
+            
             if (range) {
                 range.setEndAfter(lastPage.lastChild);
                 overflow = range.extractContents();
             
-                if (overflow.firstChild.textContent.length===0) {
+                if ((overflow.firstChild.nodeName==='P'||overflow.firstChild.nodeName==='DIV') && overflow.firstChild.innerHTML.length===0) {
                     overflow.removeChild(overflow.firstChild);
                 }
-
-                if (overflow.firstChild) {
+                if (lastPage.innerHTML==='<p></p>'||lastPage.innerHTML==='<div></div>') {
+                    lastPage.removeChild(lastPage.firstChild);
+                    lastPage.appendChild(overflow);
+                } else if (overflow.firstChild && lastPage.firstChild) {
                     fillPage(overflow);
                 }
             }
