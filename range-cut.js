@@ -8,7 +8,7 @@ function flowElement(node, container) {
     function caretRange(x,y) {
         if (document.caretPositionFromPoint) {
             // Firefox
-            var position = document.caretPositionFromPoint(x+ window.pageXOffset,y+ window.pageYOffset),
+            var position = document.caretPositionFromPoint(x,y),
                 range = document.createRange();
             range.setStart(position.offsetNode, position.offset);
             return range;
