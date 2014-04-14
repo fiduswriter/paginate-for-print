@@ -137,6 +137,8 @@
         .pagination-page {\
             page-break-after: always;\
             page-break-before: always;\
+            margin-left: auto;\
+            margin-right: auto;\
         }\
         .pagination-page:first-child {\
             page-break-before: avoid;\
