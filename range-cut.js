@@ -70,6 +70,14 @@
                 return range;
             };
             pagination.columnWidthTerm = 'mozColumnWidth';
+            var stylesheet = document.createElement('style');
+            // Small fix for Firefox to not print first two pages on top of oneanother.
+            stylesheet.innerHTML = "\
+            .pagination-page:first-child {\
+                page-break-before: always;\
+            }\
+            ";
+             document.head.appendChild(stylesheet);
         } else {
             // Webkit + Chrome
             pagination.caretRange = function (x, y) {
@@ -125,7 +133,16 @@
         }\
         .pagination-page {\
             position: relative;\
+        }\
+        .pagination-page {\
             page-break-after: always;\
+            page-break-before: always;\
+        }\
+        .pagination-page:first-child {\
+            page-break-before: avoid;\
+        }\
+        .pagination-page:last-child {\
+            page-break-after: avoid;\
         }\
         .pagination-main-contents-container {\
             position: absolute;\
