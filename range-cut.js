@@ -125,6 +125,7 @@
         }\
         .pagination-page {\
             position: relative;\
+            page-break-after: always;\
         }\
         .pagination-main-contents-container {\
             position: absolute;\
@@ -225,7 +226,7 @@
     };
 
 
-    pagination.createPage = function (container) {
+    pagination.createPage = function (container, pageCounterClass) {
         var page = document.createElement('div');
         page.classList.add('pagination-page');
         contentsContainer = document.createElement('div');
@@ -244,13 +245,23 @@
         mainContentsContainer.appendChild(footnotes);
 
         page.appendChild(mainContentsContainer);
+        
+        if (pagination.config('numberPages')) {
+            pagenumberfield = document.createElement('div');
+            pagenumberfield.classList.add('pagination-pagenumber');
+            pagenumberfield.classList.add('pagination-' + pageCounterClass);
+
+            page.appendChild(pagenumberfield);
+        }
+        
+        
         container.appendChild(page);
         return contents;
     };
 
     pagination.fillPage = function (node, container) {
 
-        var lastPage = pagination.createPage(container),
+        var lastPage = pagination.createPage(container, 'arabic'),
             clonedNode = node.cloneNode(true),
             footnotes, footnotesLength, clonedFootnote, i, oldFn, fnHeightTotal;
 
