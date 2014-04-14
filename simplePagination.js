@@ -26,7 +26,7 @@
         //        'chapterStartMarker': 'h2',
         //        'chapterTitleMarker': 'h2',
         'flowElement': 'document.body',
-        //        'alwaysEven': false,
+        'alwaysEven': false,
         //        'columns': 1,
         //        'enableFrontmatter': true,
         //        'enableTableOfFigures': false,
@@ -283,7 +283,7 @@
      */
 
     pagination.pageCounters.arab = new pagination.pageCounterCreator(
-        'arabic');
+        'arab');
     // arab is the page counter used by the main body contents.
 
     pagination.pageCounters.roman = new pagination.pageCounterCreator(
@@ -362,9 +362,9 @@
         return contents;
     };
 
-    pagination.fillPage = function (node, container) {
+    pagination.fillPage = function (node, container, pageCounterStyle) {
 
-        var lastPage = pagination.createPage(container, 'arabic'),
+        var lastPage = pagination.createPage(container, pageCounterStyle),
             clonedNode = node.cloneNode(true),
             footnotes, footnotesLength, clonedFootnote, i, oldFn, fnHeightTotal;
 
@@ -416,34 +416,52 @@
             if (lastPage.innerHTML === '<p></p>' || lastPage.innerHTML === '<div></div>') {
                 lastPage.removeChild(lastPage.firstChild);
                 lastPage.appendChild(overflow);
-                pagination.finish();
+                pagination.finish(container, pageCounterStyle);
             } else if (overflow.firstChild && lastPage.firstChild) {
                 setTimeout(function(){
-                pagination.fillPage(overflow, container);},1);
+                pagination.fillPage(overflow, container, pageCounterStyle);},1);
             } else {
-                pagination.finish();
+                pagination.finish(container, pageCounterStyle);
             }
 
         } else {
-            pagination.finish();
+            pagination.finish(container, pageCounterStyle);
         }
     };
     
-    pagination.finish = function () {
+    pagination.finish = function (container, pageCounterStyle) {
+        if (pagination.config('alwaysEven') && container.querySelectorAll('.pagination-page').length % 2 === 1) {
+            container.appendChild(pagination.createPage(container, pageCounterStyle));
+        }
         window.scrollTo(0,0);
-        pagination.pageCounters.arab.numberPages();
+        pagination.pageCounters[pageCounterStyle].numberPages();
     };
 
-    pagination.flowElement = function (node, container) {
-        var overflow = document.createDocumentFragment();
+    pagination.flowElement = function (overflow, container, pageCounterStyle) {
 
-        while (node.firstChild) {
-            overflow.appendChild(node.firstChild);
-        }
         setTimeout( function() {
             window.scrollTo(0,document.body.scrollHeight);
-            pagination.fillPage(overflow, container);
+            pagination.fillPage(overflow, container, pageCounterStyle);
         }, 1);
+    };
+    
+    pagination.applyLayout = function() {
+        // Create div for layout
+        var layoutDiv = document.createElement('div'), 
+            bodyLayoutDiv = document.createElement('div'), 
+            flowedElement = eval(pagination.config('flowElement')),
+            flowFragment = document.createDocumentFragment();
+
+        while (flowedElement.firstChild) {
+            flowFragment.appendChild(flowedElement.firstChild);
+        }
+        
+        layoutDiv.id = 'pagination-layout';
+        bodyLayoutDiv.id = 'pagination-body';
+        layoutDiv.appendChild(bodyLayoutDiv);
+        document.body.appendChild(layoutDiv);
+        
+        pagination.flowElement(flowFragment, bodyLayoutDiv, 'arab');
     };
 
     if (pagination.config('autoStart') === true) {
@@ -459,14 +477,16 @@
                         counter++;
                         if (counter === len) {
                             
-                            pagination.flowElement(eval(pagination.config('flowElement')), document.body);
+                            pagination.applyLayout();
                         }
                     }
 
                     [].forEach.call(imgs, function (img) {
                         img.addEventListener('load', incrementCounter, false);
                     });
-
+                    if (len===0) {
+                        incrementCounter();
+                    }
                 }
             }
         );
