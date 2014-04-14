@@ -228,7 +228,7 @@
         contents.style.height = (contents.parentElement.clientHeight - contents.nextSibling.clientHeight) + 'px';
 
         contents.style[pagination.columnWidthTerm] = contents.clientWidth + 'px';
-//window.scrollTo(0,document.body.scrollHeight);
+
         var coordinates = contents.getBoundingClientRect(),
             bottomLeftX = coordinates.left,
             bottomLeftY = coordinates.bottom,
@@ -237,7 +237,7 @@
 
         range.setEndAfter(contents.lastChild);
         overflow = range.extractContents();
-
+        contents.style[pagination.columnWidthTerm] = "auto";
 
         return overflow;
     };
