@@ -38,7 +38,7 @@
         //        'pagesToAddIncrementRatio': 1.4,
         //        'frontmatterContents': '',
         'autoStart': true,
-        //        'numberPages': true,
+        'numberPages': true,
         //        'divideContents': true,
         //        'footnoteSelector': '.pagination-footnote',
         //        'topfloatSelector': '.pagination-topfloat',
@@ -144,7 +144,7 @@
         .pagination-page:last-child {\
             page-break-after: avoid;\
         }\
-        .pagination-main-contents-container {\
+        .pagination-main-contents-container, .pagination-pagenumber {\
             position: absolute;\
         }\
         ";
@@ -222,6 +222,90 @@
         }
         return returnValue;
     };
+    
+    pagination.pageCounterCreator = function (cssClass, show) {
+        /* Create a pagecounter. cssClass is the CSS class employed by this page
+         * counter to mark all page numbers associated with it. If a show function
+         * is specified, use this instead of the built-in show function.
+         */
+        this.cssClass = cssClass;
+        if (show !== undefined) {
+            this.show = show;
+        }
+    };
+
+    pagination.pageCounterCreator.prototype.value = 0;
+    // The initial value of any page counter is 0.
+
+    //pagination.pageCounterCreator.prototype.needsUpdate = false;
+    /* needsUpdate controls whether a given page counter should be updated. 
+     * Initially this is not the case.
+     */
+
+    pagination.pageCounterCreator.prototype.show = function () {
+        /* Standard show function for page counter is to show the value itself
+         * using arabic numbers.
+         */
+        return this.value;
+    };
+
+    pagination.pageCounterCreator.prototype.incrementAndShow = function () {
+        /* Increment the page count by one and return the reuslt page count 
+         * using the show function.
+         */
+        this.value++;
+        return this.show();
+    };
+
+
+    pagination.pageCounterCreator.prototype.numberPages = function () {
+        /* If the pages associated with this page counter need to be updated, 
+         * go through all of them from the start of the book and number them,
+         * thereby potentially removing old page numbers.
+         */
+        var pagenumbersToNumber, i;
+        this.value = 0;
+      //  this.needsUpdate = false;
+
+        pagenumbersToNumber = document.querySelectorAll(
+            '.pagination-page .pagination-pagenumber.pagination-' + this.cssClass);
+        for (i = 0; i < pagenumbersToNumber.length; i++) {
+            pagenumbersToNumber[i].innerHTML = this.incrementAndShow();
+        }
+    };
+
+    pagination.pageCounters = {};
+    /* pagination.pageCounters contains all the page counters we use in a book --
+     * typically these are two -- roman for the frontmatter and arab for the main
+     * body contents.
+     */
+
+    pagination.pageCounters.arab = new pagination.pageCounterCreator(
+        'arabic');
+    // arab is the page counter used by the main body contents.
+
+    pagination.pageCounters.roman = new pagination.pageCounterCreator(
+        'roman',
+        pagination.romanize);
+    // roman is the page counter used by the frontmatter.    
+    
+    
+    pagination.romanize = function () {
+        // Create roman numeral representations of numbers.
+        var digits = String(+this.value).split(""),
+            key = ["", "C", "CC", "CCC", "CD", "D", "DC", "DCC", "DCCC", "CM",
+                "",
+                "X", "XX", "XXX", "XL", "L", "LX", "LXX", "LXXX", "XC", "",
+                "I", "II",
+                "III", "IV", "V", "VI", "VII", "VIII", "IX"
+            ],
+            roman = "",
+            i = 3;
+        while (i--) {
+            roman = (key[+digits.pop() + (i * 10)] || "") + roman;
+        }
+        return new Array(+digits.join("") + 1).join("M") + roman;
+    };
 
     pagination.cutToFit = function (contents) {
 
@@ -256,7 +340,7 @@
 
         footnotes = document.createElement('div');
         footnotes.classList.add('pagination-footnotes');
-        footnotes.innerHTML = "<p></p>";
+        footnotes.appendChild(document.createElement('p'));
 
         mainContentsContainer.appendChild(contents);
         mainContentsContainer.appendChild(footnotes);
@@ -294,6 +378,11 @@
             footnotes = lastPage.querySelectorAll('.pagination-footnote');
             footnotesLength = footnotes.length;
             if (footnotesLength > 0) {
+                
+                while (lastPage.nextSibling.firstChild) {
+                    lastPage.nextSibling.removeChild(lastPage.nextSibling.firstChild);
+                }
+                
                 for (i = 0; i < footnotesLength; i++) {
                     clonedFootnote = footnotes[i].cloneNode(true);
                     lastPage.nextSibling.appendChild(clonedFootnote);
@@ -325,18 +414,22 @@
             if (lastPage.innerHTML === '<p></p>' || lastPage.innerHTML === '<div></div>') {
                 lastPage.removeChild(lastPage.firstChild);
                 lastPage.appendChild(overflow);
-                setTimeout(function(){window.scrollTo(0,0);},1000);
+                pagination.finish();
             } else if (overflow.firstChild && lastPage.firstChild) {
                 setTimeout(function(){
                 pagination.fillPage(overflow, container);},1);
             } else {
-                console.log('here')
-                setTimeout(function(){window.scrollTo(0,0);},1000);
+                pagination.finish();
             }
 
         } else {
-            window.scrollTo(0,0);
+            pagination.finish();
         }
+    };
+    
+    pagination.finish = function () {
+        window.scrollTo(0,0);
+        pagination.pageCounters.arab.numberPages();
     };
 
     pagination.flowElement = function (node, container) {
