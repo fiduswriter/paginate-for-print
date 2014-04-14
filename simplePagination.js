@@ -21,10 +21,10 @@
 
     defaults = {
         // pagination.config starts out with default config options.
-        //        'sectionStartMarker': 'h1',
-        //        'sectionTitleMarker': 'h1',
-        //        'chapterStartMarker': 'h2',
-        //        'chapterTitleMarker': 'h2',
+        'sectionStartMarker': 'h1',
+        //'sectionTitleMarker': 'h1',
+        'chapterStartMarker': 'h2',
+        //'chapterTitleMarker': 'h2',
         'flowElement': 'document.body',
         'alwaysEven': false,
         //        'columns': 1,
@@ -39,7 +39,7 @@
         //        'frontmatterContents': '',
         'autoStart': true,
         'numberPages': true,
-        //        'divideContents': true,
+        'divideContents': false,
         //        'footnoteSelector': '.pagination-footnote',
         //        'topfloatSelector': '.pagination-topfloat',
         //        'marginnoteSelector': '.pagination-marginnote',
@@ -116,7 +116,7 @@
         .pagination-contents .pagination-footnote > * {\
             display:none;\
         }\
-        .pagination-main-contents-container .pagination-footnote {\
+        .pagination-main-contents-container .pagination-footnote, figure {\
             -webkit-column-break-inside: avoid;\
             page-break-inside: avoid;\
         }\
@@ -310,19 +310,31 @@
     };
 
     pagination.cutToFit = function (contents) {
+        
+        var coordinates, range, overflow;
 
         contents.style.height = (contents.parentElement.clientHeight - contents.nextSibling.clientHeight) + 'px';
 
         contents.style[pagination.columnWidthTerm] = contents.clientWidth + 'px';
 
-        var coordinates = contents.getBoundingClientRect(),
-            bottomLeftX = coordinates.left,
-            bottomLeftY = coordinates.bottom,
-            range = pagination.caretRange(bottomLeftX + 1, bottomLeftY - 1);
+        coordinates = contents.getBoundingClientRect();
+        range = pagination.caretRange(coordinates.right - 1, coordinates.bottom - 1); 
 
-
-        range.setEndAfter(contents.lastChild);
-        overflow = range.extractContents();
+            if (!range) {
+                range = pagination.caretRange(coordinates.left + 1, coordinates.bottom - 1);
+            }
+            
+//        if (range !== null && contents.lastChild) {
+            range.setEndAfter(contents.lastChild);
+            overflow = range.extractContents();
+  //      } else {
+  //          overflow = document.createDocumentFragment();
+  //      }
+            if (!contents.lastChild || (contents.textContent.trim().length===0 && contents.querySelectorAll('img,svg,canvas').length===0)) {
+                //console.log('de');
+                contents.appendChild(overflow);
+                overflow = false;
+            } 
         contents.style[pagination.columnWidthTerm] = "auto";
 
         return overflow;
@@ -370,13 +382,15 @@
 
 
         lastPage.appendChild(node);
+        console.log(lastPage.innerHTML);
         lastPage.nextSibling.scrollIntoView(false);
 
-        if (lastPage.scrollHeight > lastPage.clientHeight) {
+//        if (lastPage.scrollHeight > lastPage.clientHeight) {
+            console.log('1');
 
             overflow = pagination.cutToFit(lastPage);
 
-
+//console.log(overflow)
             footnotes = lastPage.querySelectorAll('.pagination-footnote');
             footnotesLength = footnotes.length;
             if (footnotesLength > 0) {
@@ -394,12 +408,11 @@
                     lastPage.removeChild(lastPage.firstChild);
                 }
 
-
                 lastPage.appendChild(clonedNode);
                 lastPage.nextSibling.scrollIntoView(false);
 
                 overflow = pagination.cutToFit(lastPage);
-
+                console.log(overflow);
                 for (i = lastPage.querySelectorAll('.pagination-footnote').length; i < footnotesLength; i++) {
                     oldFn = lastPage.nextSibling.children[i];
 
@@ -410,31 +423,52 @@
             }
 
 
-            if ((overflow.firstChild.nodeName === 'P' || overflow.firstChild.nodeName === 'DIV') && overflow.firstChild.innerHTML.length === 0) {
+            if (overflow.firstChild && overflow.firstChild.textContent.trim().length === 0 && (overflow.firstChild.nodeName === 'P' || overflow.firstChild.nodeName === 'DIV')) {
                 overflow.removeChild(overflow.firstChild);
             }
-            if (lastPage.innerHTML === '<p></p>' || lastPage.innerHTML === '<div></div>') {
+
+            if (lastPage.firstChild && 
+                lastPage.firstChild.nodeType != 3 &&
+                lastPage.firstChild.textContent.trim().length === 0 &&
+                lastPage.firstChild.querySelectorAll('img,svg,canvas').length===0) {
                 lastPage.removeChild(lastPage.firstChild);
-                lastPage.appendChild(overflow);
-                pagination.finish(container, pageCounterStyle);
-            } else if (overflow.firstChild && lastPage.firstChild) {
+               // lastPage.appendChild(overflow);
+               // pagination.finish(container, pageCounterStyle);
+            } else 
+                if (overflow.firstChild && lastPage.firstChild) {
                 setTimeout(function(){
-                pagination.fillPage(overflow, container, pageCounterStyle);},1);
+                pagination.fillPage(overflow, container, pageCounterStyle);},1000);
             } else {
                 pagination.finish(container, pageCounterStyle);
             }
+            
 
-        } else {
+        /*} else {
             pagination.finish(container, pageCounterStyle);
-        }
+        }*/
     };
     
     pagination.finish = function (container, pageCounterStyle) {
+        var newContainer;
         if (pagination.config('alwaysEven') && container.querySelectorAll('.pagination-page').length % 2 === 1) {
             container.appendChild(pagination.createPage(container, pageCounterStyle));
         }
-        window.scrollTo(0,0);
-        pagination.pageCounters[pageCounterStyle].numberPages();
+        if (pagination.config('divideContents') && container.classList.contains('pagination-body')) {
+            if (++pagination.currentFragment < pagination.bodyFlowFragments.length) {
+                newContainer = document.createElement('div');
+                container.parentElement.appendChild(newContainer);
+                newContainer.classList.add('pagination-body');
+                newContainer.classList.add('pagination-body-'+pagination.currentFragment);
+                pagination.flowElement(pagination.bodyFlowFragments[pagination.currentFragment], newContainer, pageCounterStyle);
+            }
+            else {
+                window.scrollTo(0,0);
+                pagination.pageCounters[pageCounterStyle].numberPages();
+            }
+        } else {
+            window.scrollTo(0,0);
+            pagination.pageCounters[pageCounterStyle].numberPages();
+        }
     };
 
     pagination.flowElement = function (overflow, container, pageCounterStyle) {
@@ -445,7 +479,7 @@
         }, 1);
     };
     
-    pagination.applyLayout = function() {
+    pagination.applyBookLayoutNonDestructive = function() {
         // Create div for layout
         var layoutDiv = document.createElement('div'), 
             bodyLayoutDiv = document.createElement('div'), 
@@ -463,6 +497,58 @@
         
         pagination.flowElement(flowFragment, bodyLayoutDiv, 'arab');
     };
+    
+    pagination.applyBookLayout = function() {
+        // Create div for layout
+        var layoutDiv = document.createElement('div'),  
+            flowedElement = eval(pagination.config('flowElement')),
+            flowFragment,
+            dividerSelector = pagination.config('chapterStartMarker') + ',' + pagination.config('sectionStartMarker'),
+            dividers = flowedElement.querySelectorAll(dividerSelector), 
+            range = document.createRange(), lastElement, extraElement, i;
+        
+        pagination.bodyFlowFragments = [];
+        pagination.currentFragment = 0;
+        layoutDiv.id = 'pagination-layout';    
+            
+        for(i=0;i<dividers.length;i++) {
+            range.setStart(flowedElement.firstChild,0);
+            range.setEnd(dividers[i], 0);
+            flowFragment = range.extractContents();
+            pagination.bodyFlowFragments.push(flowFragment);
+
+            extraElement = flowFragment.querySelectorAll(dividerSelector)[1];
+            if (extraElement) {
+                extraElement.parentElement.removeChild(extraElement);
+            }
+            if (i===0) {
+                if (flowFragment.textContent.trim().length===0 && flowFragment.querySelectorAll('img,svg,canvas,hr').length===0) {
+                    pagination.bodyFlowFragments.pop();
+                }
+            }
+        }
+        
+        lastElement = document.createDocumentFragment();
+
+        while (flowedElement.firstChild) {
+            lastElement.appendChild(flowedElement.firstChild);
+        }
+        
+        pagination.bodyFlowFragments.push(lastElement);
+        
+        document.body.appendChild(layoutDiv);
+
+      //  pagination.totalSections = pagination.bodyFlowFragments.length;
+
+       // for (i=0; i < flowFragments.length; i++) {
+        layoutDiv.appendChild(document.createElement('div'));
+        layoutDiv.lastChild.classList.add('pagination-body');
+        layoutDiv.lastChild.classList.add('pagination-body-0');
+        pagination.flowElement(pagination.bodyFlowFragments[0], layoutDiv.firstChild, 'arab');
+       // }
+        
+        
+    };    
 
     if (pagination.config('autoStart') === true) {
         document.addEventListener(
@@ -476,8 +562,11 @@
                     function incrementCounter() {
                         counter++;
                         if (counter === len) {
-                            
-                            pagination.applyLayout();
+                            if (pagination.config('divideContents')) {
+                                pagination.applyBookLayout();
+                            } else {
+                                pagination.applyBookLayoutNonDestructive();
+                            }
                         }
                     }
 
