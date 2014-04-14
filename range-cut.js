@@ -1,4 +1,15 @@
+/*!
+ * simplePagination.js
+ * Copyright 2014 Johannes Wilm. Freely available under the AGPL. For further details see LICENSE.txt
+ *
+ * This is a drop-in replacement for pagination.js that does not use CSS Regions.
+ * Please see pagination.js for usage instructions. Only basic options are available.
+ */
+
+
 (function () {
+    
+    
 
     var exports = this,
         defaults,
@@ -76,6 +87,7 @@
         /* Initiate pagination.js by importing user set config options and 
          * setting basic CSS style.
          */
+        //window.scrollTo(0,0);
         this.setStyle();
         this.setPageStyle();
         document.head.insertBefore(
@@ -169,8 +181,10 @@
             .pagination-page:nth-child(odd) .pagination-header-section {display:none;}\
             .pagination-page:nth-child(even) .pagination-header-chapter {display:none;}\
             .pagination-page:nth-child(even) .pagination-pagenumber,\
-            .pagination-page:nth-child(even) .pagination-header {\
-            text-align:left;}\
+            .pagination-page:nth-child(even) .pagination-header { text-align:left;}\
+            .pagination-footnote > * > * {font-size: 0.7em; margin:.25em;}\
+            .pagination-footnote > * > *::before, .pagination-footnote::before \
+            {position: relative; top: -0.5em; font-size: 80%;}\
             ";
 
     };
@@ -196,7 +210,7 @@
         contents.style.height = (contents.parentElement.clientHeight - contents.nextSibling.clientHeight) + 'px';
 
         contents.style[pagination.columnWidthTerm] = contents.clientWidth + 'px';
-
+//window.scrollTo(0,document.body.scrollHeight);
         var coordinates = contents.getBoundingClientRect(),
             bottomLeftX = coordinates.left,
             bottomLeftY = coordinates.bottom,
@@ -242,7 +256,7 @@
 
 
         lastPage.appendChild(node);
-        lastPage.scrollIntoView(true);
+        lastPage.nextSibling.scrollIntoView(false);
 
         if (lastPage.scrollHeight > lastPage.clientHeight) {
 
@@ -263,7 +277,7 @@
 
 
                 lastPage.appendChild(clonedNode);
-                lastPage.scrollIntoView(true);
+                lastPage.nextSibling.scrollIntoView(false);
 
                 overflow = pagination.cutToFit(lastPage);
 
@@ -283,10 +297,17 @@
             if (lastPage.innerHTML === '<p></p>' || lastPage.innerHTML === '<div></div>') {
                 lastPage.removeChild(lastPage.firstChild);
                 lastPage.appendChild(overflow);
+                setTimeout(function(){window.scrollTo(0,0);},1000);
             } else if (overflow.firstChild && lastPage.firstChild) {
-                pagination.fillPage(overflow, container);
+                setTimeout(function(){
+                pagination.fillPage(overflow, container);},1);
+            } else {
+                console.log('here')
+                setTimeout(function(){window.scrollTo(0,0);},1000);
             }
 
+        } else {
+            window.scrollTo(0,0);
         }
     };
 
@@ -296,8 +317,10 @@
         while (node.firstChild) {
             overflow.appendChild(node.firstChild);
         }
-
-        pagination.fillPage(overflow, container);
+        setTimeout( function() {
+            window.scrollTo(0,document.body.scrollHeight);
+            pagination.fillPage(overflow, container);
+        }, 1);
     };
 
     if (pagination.config('autoStart') === true) {
@@ -312,7 +335,8 @@
                     function incrementCounter() {
                         counter++;
                         if (counter === len) {
-                            pagination.flowElement(document.getElementById('text'), document.body);
+                            
+                            pagination.flowElement(eval(pagination.config('flowElement')), document.body);
                         }
                     }
 
