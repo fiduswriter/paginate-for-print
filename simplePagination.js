@@ -38,7 +38,7 @@
         'autoStart': true,
         'numberPages': true,
         'divideContents': true,
-        //        'footnoteSelector': '.pagination-footnote',
+        'footnoteSelector': '.pagination-footnote',
         //        'topfloatSelector': '.pagination-topfloat',
         //        'marginnoteSelector': '.pagination-marginnote',
         //        'maxPageNumber': 10000,
@@ -67,7 +67,7 @@
                 range.setStart(position.offsetNode, position.offset);
                 return range;
             };
-            pagination.matchesSelector = function(element, selector) {
+            pagination.matchesSelector = function (element, selector) {
                 return element.mozMatchesSelector(selector);
             };
             pagination.columnWidthTerm = 'MozColumnWidth';
@@ -85,7 +85,7 @@
             pagination.caretRange = function (x, y) {
                 return document.caretRangeFromPoint(x, y);
             }
-            pagination.matchesSelector = function(element, selector) {
+            pagination.matchesSelector = function (element, selector) {
                 return element.webkitMatchesSelector(selector);
             };
             pagination.columnWidthTerm = 'webkitColumnWidth';
@@ -113,26 +113,27 @@
         /* Set style for the regions and pages used by pagination.js and add it
          * to the head of the DOM.
          */
-        var stylesheet = document.createElement('style');
+        var stylesheet = document.createElement('style'),
+            footnoteSelector = pagination.config('footnoteSelector');
         stylesheet.innerHTML = "\
-        .pagination-footnotes .pagination-footnote {\
+        .pagination-footnotes " + footnoteSelector + " {\
             display: block;\
         }\
-        .pagination-contents .pagination-footnote > * {\
+        .pagination-contents " + footnoteSelector + " > * {\
             display:none;\
         }\
-        .pagination-main-contents-container .pagination-footnote, figure {\
+        .pagination-main-contents-container " + footnoteSelector + ", figure {\
             -webkit-column-break-inside: avoid;\
             page-break-inside: avoid;\
         }\
         body {\
             counter-reset: pagination-footnote pagination-footnote-reference;\
         }\
-        .pagination-contents .pagination-footnote::before {\
+        .pagination-contents " + footnoteSelector + "::before {\
             counter-increment: pagination-footnote-reference;\
             content: counter(pagination-footnote-reference);\
         }\
-        .pagination-footnote > * > *:first-child::before {\
+        " + footnoteSelector + " > * > *:first-child::before {\
             counter-increment: pagination-footnote;\
             content: counter(pagination-footnote);\
         }\
@@ -179,7 +180,8 @@
                 unit,
             headerTopMargin = pagination.config('headerTopMargin') + unit,
             imageMaxHeight = contentsHeightNumber - .1 + unit,
-            imageMaxWidth = contentsWidthNumber - .1 + unit;
+            imageMaxWidth = contentsWidthNumber - .1 + unit,
+            footnoteSelector = pagination.config('footnoteSelector');
 
         pagination.pageStyleSheet.innerHTML = "\
             .pagination-page {height:" + pageHeight + "; width:" + pageWidth + ";\
@@ -207,8 +209,8 @@
             .pagination-page:nth-child(even) .pagination-header-chapter {display:none;}\
             .pagination-page:nth-child(even) .pagination-pagenumber,\
             .pagination-page:nth-child(even) .pagination-header { text-align:left;}\
-            .pagination-footnote > * > * {font-size: 0.7em; margin:.25em;}\
-            .pagination-footnote > * > *::before, .pagination-footnote::before \
+            " + footnoteSelector + " > * > * {font-size: 0.7em; margin:.25em;}\
+            " + footnoteSelector + " > * > *::before, " + footnoteSelector + "::before \
             {position: relative; top: -0.5em; font-size: 80%;}\
             ";
 
@@ -352,23 +354,23 @@
         contentsContainer.classList.add('pagination-contents-container');
         mainContentsContainer.classList.add('pagination-main-contents-container');
 
-        if (pagination.currentChapter||pagination.currentSection) {
-        
+        if (pagination.currentChapter || pagination.currentSection) {
+
             header = document.createElement('div');
-            
+
             header.classList.add('pagination-header');
 
             if (pagination.currentChapter) {
-                
+
                 chapterHeader = document.createElement('span');
-                
+
                 chapterHeader.classList.add('pagination-header-chapter');
                 chapterHeader.appendChild(pagination.currentChapter.cloneNode(true));
                 header.appendChild(chapterHeader);
             }
-            
+
             if (pagination.currentSection) {
-                
+
                 sectionHeader = document.createElement('span');
                 sectionHeader.classList.add('pagination-header-section');
                 sectionHeader.appendChild(pagination.currentSection.cloneNode(true));
@@ -405,13 +407,13 @@
 
         var lastPage = pagination.createPage(container, pageCounterStyle),
             clonedNode = node.cloneNode(true),
-            footnotes, footnotesLength, clonedFootnote, i, oldFn, fnHeightTotal;
+            footnotes, footnotesLength, clonedFootnote, i, oldFn, fnHeightTotal, footnoteSelector = pagination.config('footnoteSelector');
 
         lastPage.appendChild(node);
 
         overflow = pagination.cutToFit(lastPage);
 
-        footnotes = lastPage.querySelectorAll('.pagination-footnote');
+        footnotes = lastPage.querySelectorAll(footnoteSelector);
         footnotesLength = footnotes.length;
         if (footnotesLength > 0) {
 
@@ -431,7 +433,7 @@
             lastPage.appendChild(clonedNode);
 
             overflow = pagination.cutToFit(lastPage);
-            for (i = lastPage.querySelectorAll('.pagination-footnote').length; i < footnotesLength; i++) {
+            for (i = lastPage.querySelectorAll(footnoteSelector).length; i < footnotesLength; i++) {
                 oldFn = lastPage.nextSibling.children[i];
 
                 while (oldFn.firstChild) {
@@ -474,14 +476,14 @@
                 container.parentElement.appendChild(newContainer);
                 newContainer.classList.add('pagination-body');
                 newContainer.classList.add('pagination-body-' + pagination.currentFragment);
-        if (pagination.bodyFlowObjects[pagination.currentFragment].section) {
-            pagination.currentSection = pagination.bodyFlowObjects[pagination.currentFragment].section;
-            newContainer.classList.add('pagination-section');
-        }
-        if (pagination.bodyFlowObjects[pagination.currentFragment].chapter) {
-            pagination.currentChapter = pagination.bodyFlowObjects[pagination.currentFragment].chapter;
-            newContainer.classList.add('pagination-chapter');
-        } 
+                if (pagination.bodyFlowObjects[pagination.currentFragment].section) {
+                    pagination.currentSection = pagination.bodyFlowObjects[pagination.currentFragment].section;
+                    newContainer.classList.add('pagination-section');
+                }
+                if (pagination.bodyFlowObjects[pagination.currentFragment].chapter) {
+                    pagination.currentChapter = pagination.bodyFlowObjects[pagination.currentFragment].chapter;
+                    newContainer.classList.add('pagination-chapter');
+                }
                 pagination.flowElement(pagination.bodyFlowObjects[pagination.currentFragment].fragment, newContainer, pageCounterStyle, pagination.bodyFlowObjects[pagination.currentFragment].section, pagination.bodyFlowObjects[pagination.currentFragment].chapter);
             } else {
                 window.scrollTo(0, 0);
@@ -530,7 +532,8 @@
             dividerSelector = chapterStartSelector + ',' + sectionStartSelector,
             dividers = flowedElement.querySelectorAll(dividerSelector),
             range = document.createRange(),
-            extraElement, tempNode,  i, nextChapter = false, nextSection = false;
+            extraElement, tempNode, i, nextChapter = false,
+            nextSection = false;
 
         pagination.bodyFlowObjects = [];
         pagination.currentFragment = 0;
@@ -559,7 +562,7 @@
                 extraElement.parentElement.removeChild(extraElement);
             }
             if (pagination.matchesSelector(dividers[i], chapterStartSelector)) {
-                
+
                 tempNode = flowedElement.querySelector(pagination.config('chapterTitleMarker')).cloneNode(true);
                 nextChapter = document.createDocumentFragment();
                 while (tempNode.firstChild) {
@@ -572,7 +575,7 @@
                     nextSection.appendChild(tempNode.firstChild);
                 }
             }
-            
+
             if (i === 0) {
                 if (flowObject.fragment.textContent.trim().length === 0 && flowObject.fragment.querySelectorAll('img,svg,canvas,hr').length === 0) {
                     pagination.bodyFlowObjects.pop();
@@ -580,24 +583,24 @@
             }
         }
 
-            flowObject = {
-                chapter: false,
-                section: false
-            };
-            if (nextChapter) {
-                flowObject.chapter = nextChapter;
-            }
-            if (nextSection) {
-                flowObject.section = nextSection;
-            }
-        
+        flowObject = {
+            chapter: false,
+            section: false
+        };
+        if (nextChapter) {
+            flowObject.chapter = nextChapter;
+        }
+        if (nextSection) {
+            flowObject.section = nextSection;
+        }
+
         flowObject.fragment = document.createDocumentFragment();
 
         while (flowedElement.firstChild) {
             flowObject.fragment.appendChild(flowedElement.firstChild);
         }
 
-        
+
         pagination.bodyFlowObjects.push(flowObject);
 
         document.body.appendChild(layoutDiv);
@@ -613,7 +616,7 @@
         if (pagination.bodyFlowObjects[pagination.currentFragment].chapter) {
             pagination.currentChapter = pagination.bodyFlowObjects[pagination.currentFragment].chapter;
             layoutDiv.firstChild.classList.add('pagination-chapter');
-        }        
+        }
         pagination.flowElement(pagination.bodyFlowObjects[pagination.currentFragment].fragment, layoutDiv.firstChild, 'arab');
 
 
