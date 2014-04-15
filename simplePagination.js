@@ -335,17 +335,33 @@
 
 
     pagination.createPage = function (container, pageCounterClass) {
-        var page = document.createElement('div');
+        var page = document.createElement('div'),
+            contentsContainer = document.createElement('div'),
+            mainContentsContainer = document.createElement('div'),
+            header = document.createElement('div'),
+            chapterheader = document.createElement('span'),
+            sectionheader = document.createElement('span'),
+            contents = document.createElement('div'),
+            footnotes = document.createElement('div'),
+            pagenumberfield = document.createElement('div');
+
+
         page.classList.add('pagination-page');
-        contentsContainer = document.createElement('div');
         contentsContainer.classList.add('pagination-contents-container');
-        mainContentsContainer = document.createElement('div');
         mainContentsContainer.classList.add('pagination-main-contents-container');
 
-        contents = document.createElement('div');
+        header.classList.add('pagination-header');
+
+        chapterheader.classList.add('pagination-header-chapter');
+        header.appendChild(chapterheader);
+
+        sectionheader.classList.add('pagination-header-section');
+        header.appendChild(sectionheader);
+
+        page.appendChild(header);
+
         contents.classList.add('pagination-contents');
 
-        footnotes = document.createElement('div');
         footnotes.classList.add('pagination-footnotes');
         footnotes.appendChild(document.createElement('p'));
 
@@ -355,7 +371,7 @@
         page.appendChild(mainContentsContainer);
 
         if (pagination.config('numberPages')) {
-            pagenumberfield = document.createElement('div');
+
             pagenumberfield.classList.add('pagination-pagenumber');
             pagenumberfield.classList.add('pagination-' + pageCounterClass);
 
