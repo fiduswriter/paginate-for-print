@@ -20,9 +20,9 @@
     defaults = {
         // pagination.config starts out with default config options.
         'sectionStartMarker': 'h1',
-        //'sectionTitleMarker': 'h1',
+        'sectionTitleMarker': 'h1',
         'chapterStartMarker': 'h2',
-        //'chapterTitleMarker': 'h2',
+        'chapterTitleMarker': 'h2',
         'flowElement': 'document.body',
         'alwaysEven': true,
         //        'columns': 1,
@@ -67,7 +67,9 @@
                 range.setStart(position.offsetNode, position.offset);
                 return range;
             };
-            console.log('ff')
+            pagination.matchesSelector = function(element, selector) {
+                return element.mozMatchesSelector(selector);
+            };
             pagination.columnWidthTerm = 'MozColumnWidth';
             pagination.columnGapTerm = 'MozColumnGap';
             var stylesheet = document.createElement('style');
@@ -83,6 +85,9 @@
             pagination.caretRange = function (x, y) {
                 return document.caretRangeFromPoint(x, y);
             }
+            pagination.matchesSelector = function(element, selector) {
+                return element.webkitMatchesSelector(selector);
+            };
             pagination.columnWidthTerm = 'webkitColumnWidth';
             pagination.columnGapTerm = 'webkitColumnGap';
         }
@@ -146,7 +151,7 @@
         .pagination-page:last-child {\
             page-break-after: avoid;\
         }\
-        .pagination-main-contents-container, .pagination-pagenumber {\
+        .pagination-main-contents-container, .pagination-pagenumber, .pagination-header {\
             position: absolute;\
         }\
         ";
@@ -338,27 +343,39 @@
         var page = document.createElement('div'),
             contentsContainer = document.createElement('div'),
             mainContentsContainer = document.createElement('div'),
-            header = document.createElement('div'),
-            chapterheader = document.createElement('span'),
-            sectionheader = document.createElement('span'),
             contents = document.createElement('div'),
             footnotes = document.createElement('div'),
-            pagenumberfield = document.createElement('div');
+            header, chapterHeader, sectionheader, pagenumberField;
 
 
         page.classList.add('pagination-page');
         contentsContainer.classList.add('pagination-contents-container');
         mainContentsContainer.classList.add('pagination-main-contents-container');
 
-        header.classList.add('pagination-header');
+        if (pagination.currentChapter||pagination.currentSection) {
+        
+            header = document.createElement('div');
+            
+            header.classList.add('pagination-header');
 
-        chapterheader.classList.add('pagination-header-chapter');
-        header.appendChild(chapterheader);
-
-        sectionheader.classList.add('pagination-header-section');
-        header.appendChild(sectionheader);
-
-        page.appendChild(header);
+            if (pagination.currentChapter) {
+                
+                chapterHeader = document.createElement('span');
+                
+                chapterHeader.classList.add('pagination-header-chapter');
+                chapterHeader.appendChild(pagination.currentChapter.cloneNode(true));
+                header.appendChild(chapterHeader);
+            }
+            
+            if (pagination.currentSection) {
+                
+                sectionHeader = document.createElement('span');
+                sectionHeader.classList.add('pagination-header-section');
+                sectionHeader.appendChild(pagination.currentSection.cloneNode(true));
+                header.appendChild(sectionHeader);
+            }
+            page.appendChild(header);
+        }
 
         contents.classList.add('pagination-contents');
 
@@ -372,10 +389,11 @@
 
         if (pagination.config('numberPages')) {
 
-            pagenumberfield.classList.add('pagination-pagenumber');
-            pagenumberfield.classList.add('pagination-' + pageCounterClass);
+            pagenumberField = document.createElement('div');
+            pagenumberField.classList.add('pagination-pagenumber');
+            pagenumberField.classList.add('pagination-' + pageCounterClass);
 
-            page.appendChild(pagenumberfield);
+            page.appendChild(pagenumberField);
         }
 
 
@@ -388,7 +406,6 @@
         var lastPage = pagination.createPage(container, pageCounterStyle),
             clonedNode = node.cloneNode(true),
             footnotes, footnotesLength, clonedFootnote, i, oldFn, fnHeightTotal;
-
 
         lastPage.appendChild(node);
 
@@ -414,7 +431,6 @@
             lastPage.appendChild(clonedNode);
 
             overflow = pagination.cutToFit(lastPage);
-            console.log(overflow);
             for (i = lastPage.querySelectorAll('.pagination-footnote').length; i < footnotesLength; i++) {
                 oldFn = lastPage.nextSibling.children[i];
 
@@ -453,12 +469,20 @@
             pagination.createPage(container, pageCounterStyle);
         }
         if (pagination.config('divideContents') && container.classList.contains('pagination-body')) {
-            if (++pagination.currentFragment < pagination.bodyFlowFragments.length) {
+            if (++pagination.currentFragment < pagination.bodyFlowObjects.length) {
                 newContainer = document.createElement('div');
                 container.parentElement.appendChild(newContainer);
                 newContainer.classList.add('pagination-body');
                 newContainer.classList.add('pagination-body-' + pagination.currentFragment);
-                pagination.flowElement(pagination.bodyFlowFragments[pagination.currentFragment], newContainer, pageCounterStyle);
+        if (pagination.bodyFlowObjects[pagination.currentFragment].section) {
+            pagination.currentSection = pagination.bodyFlowObjects[pagination.currentFragment].section;
+            newContainer.classList.add('pagination-section');
+        }
+        if (pagination.bodyFlowObjects[pagination.currentFragment].chapter) {
+            pagination.currentChapter = pagination.bodyFlowObjects[pagination.currentFragment].chapter;
+            newContainer.classList.add('pagination-chapter');
+        } 
+                pagination.flowElement(pagination.bodyFlowObjects[pagination.currentFragment].fragment, newContainer, pageCounterStyle, pagination.bodyFlowObjects[pagination.currentFragment].section, pagination.bodyFlowObjects[pagination.currentFragment].chapter);
             } else {
                 window.scrollTo(0, 0);
                 pagination.pageCounters[pageCounterStyle].numberPages();
@@ -500,48 +524,97 @@
         // Create div for layout
         var layoutDiv = document.createElement('div'),
             flowedElement = eval(pagination.config('flowElement')),
-            flowFragment,
-            dividerSelector = pagination.config('chapterStartMarker') + ',' + pagination.config('sectionStartMarker'),
+            flowObject,
+            chapterStartSelector = pagination.config('chapterStartMarker'),
+            sectionStartSelector = pagination.config('sectionStartMarker'),
+            dividerSelector = chapterStartSelector + ',' + sectionStartSelector,
             dividers = flowedElement.querySelectorAll(dividerSelector),
             range = document.createRange(),
-            lastElement, extraElement, i;
+            extraElement, tempNode,  i, nextChapter = false, nextSection = false;
 
-        pagination.bodyFlowFragments = [];
+        pagination.bodyFlowObjects = [];
         pagination.currentFragment = 0;
         layoutDiv.id = 'pagination-layout';
 
         for (i = 0; i < dividers.length; i++) {
+            flowObject = {
+                chapter: false,
+                section: false
+            };
+            if (nextChapter) {
+                flowObject.chapter = nextChapter;
+                nextChapter = false;
+            }
+            if (nextSection) {
+                flowObject.section = nextSection;
+                nextSection = false;
+            }
             range.setStart(flowedElement.firstChild, 0);
             range.setEnd(dividers[i], 0);
-            flowFragment = range.extractContents();
-            pagination.bodyFlowFragments.push(flowFragment);
+            flowObject.fragment = range.extractContents();
+            pagination.bodyFlowObjects.push(flowObject);
 
-            extraElement = flowFragment.querySelectorAll(dividerSelector)[1];
+            extraElement = flowObject.fragment.querySelectorAll(dividerSelector)[1];
             if (extraElement) {
                 extraElement.parentElement.removeChild(extraElement);
             }
+            if (pagination.matchesSelector(dividers[i], chapterStartSelector)) {
+                
+                tempNode = flowedElement.querySelector(pagination.config('chapterTitleMarker')).cloneNode(true);
+                nextChapter = document.createDocumentFragment();
+                while (tempNode.firstChild) {
+                    nextChapter.appendChild(tempNode.firstChild);
+                }
+            } else {
+                tempNode = flowedElement.querySelector(pagination.config('sectionTitleMarker')).cloneNode(true);
+                nextSection = document.createDocumentFragment();
+                while (tempNode.firstChild) {
+                    nextSection.appendChild(tempNode.firstChild);
+                }
+            }
+            
             if (i === 0) {
-                if (flowFragment.textContent.trim().length === 0 && flowFragment.querySelectorAll('img,svg,canvas,hr').length === 0) {
-                    pagination.bodyFlowFragments.pop();
+                if (flowObject.fragment.textContent.trim().length === 0 && flowObject.fragment.querySelectorAll('img,svg,canvas,hr').length === 0) {
+                    pagination.bodyFlowObjects.pop();
                 }
             }
         }
 
-        lastElement = document.createDocumentFragment();
+            flowObject = {
+                chapter: false,
+                section: false
+            };
+            if (nextChapter) {
+                flowObject.chapter = nextChapter;
+            }
+            if (nextSection) {
+                flowObject.section = nextSection;
+            }
+        
+        flowObject.fragment = document.createDocumentFragment();
 
         while (flowedElement.firstChild) {
-            lastElement.appendChild(flowedElement.firstChild);
+            flowObject.fragment.appendChild(flowedElement.firstChild);
         }
 
-        pagination.bodyFlowFragments.push(lastElement);
+        
+        pagination.bodyFlowObjects.push(flowObject);
 
         document.body.appendChild(layoutDiv);
 
 
         layoutDiv.appendChild(document.createElement('div'));
-        layoutDiv.lastChild.classList.add('pagination-body');
-        layoutDiv.lastChild.classList.add('pagination-body-0');
-        pagination.flowElement(pagination.bodyFlowFragments[0], layoutDiv.firstChild, 'arab');
+        layoutDiv.firstChild.classList.add('pagination-body');
+        layoutDiv.firstChild.classList.add('pagination-body-0');
+        if (pagination.bodyFlowObjects[pagination.currentFragment].section) {
+            pagination.currentSection = pagination.bodyFlowObjects[pagination.currentFragment].section;
+            layoutDiv.firstChild.classList.add('pagination-section');
+        }
+        if (pagination.bodyFlowObjects[pagination.currentFragment].chapter) {
+            pagination.currentChapter = pagination.bodyFlowObjects[pagination.currentFragment].chapter;
+            layoutDiv.firstChild.classList.add('pagination-chapter');
+        }        
+        pagination.flowElement(pagination.bodyFlowObjects[pagination.currentFragment].fragment, layoutDiv.firstChild, 'arab');
 
 
     };
