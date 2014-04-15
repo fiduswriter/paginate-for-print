@@ -40,7 +40,7 @@
         'divideContents': true,
         'footnoteSelector': '.pagination-footnote',
         'pagebreakSelector': '.pagination-pagebreak',
-        //        'topfloatSelector': '.pagination-topfloat',
+        'topfloatSelector': '.pagination-topfloat',
         //        'marginnoteSelector': '.pagination-marginnote',
         //        'maxPageNumber': 10000,
         //        'columnSeparatorWidth': 0.09,
@@ -364,10 +364,12 @@
 
         var coordinates, range, overflow, manualPageBreak;
 
-        contents.parentElement.scrollIntoView(true);
+        contents.previousSibling.scrollIntoView(true);
+        
 
-        contents.style.height = (contents.parentElement.clientHeight - contents.nextSibling.clientHeight) + 'px';
-
+        console.log([contents.parentElement.clientHeight, contents.previousSibling.clientHeight, contents.nextSibling.clientHeight]);
+        contents.style.height = (contents.parentElement.clientHeight - contents.previousSibling.clientHeight - contents.nextSibling.clientHeight) + 'px';
+        console.log(contents.style.height);
         contents.style[pagination.columnWidthTerm] = contents.clientWidth + 'px';
         contents.style[pagination.columnGapTerm] = '0px';
         
@@ -401,6 +403,7 @@
         var page = document.createElement('div'),
             contentsContainer = document.createElement('div'),
             mainContentsContainer = document.createElement('div'),
+            topfloats = document.createElement('div'), 
             contents = document.createElement('div'),
             footnotes = document.createElement('div'),
             header, chapterHeader, sectionheader, pagenumberField;
@@ -435,11 +438,15 @@
             page.appendChild(header);
         }
 
+        topfloats.classList.add('pagination-topfloats');
+        //topfloats.appendChild(document.createElement('p'));
+        
         contents.classList.add('pagination-contents');
 
         footnotes.classList.add('pagination-footnotes');
         footnotes.appendChild(document.createElement('p'));
 
+        mainContentsContainer.appendChild(topfloats);
         mainContentsContainer.appendChild(contents);
         mainContentsContainer.appendChild(footnotes);
 
@@ -462,13 +469,30 @@
     pagination.fillPage = function (node, container, pageCounterStyle) {
 
         var lastPage = pagination.createPage(container, pageCounterStyle),
-            clonedNode = node.cloneNode(true),
-            footnotes, footnotesLength, clonedFootnote, i, oldFn, fnHeightTotal, footnoteSelector = pagination.config('footnoteSelector');
+            clonedNode = node.cloneNode(true), footnoteSelector = pagination.config('footnoteSelector'), 
+            topfloatSelector = pagination.config('topfloatSelector'), topfloatsLength, topfloats,
+            footnotes, footnotesLength, clonedFootnote, i, oldFn, fnHeightTotal;
 
         lastPage.appendChild(node);
 
         overflow = pagination.cutToFit(lastPage);
 
+        topfloatsLength = lastPage.querySelectorAll(topfloatSelector).length;
+
+        if (topfloatsLength >0) {
+            topfloats = clonedNode.querySelectorAll(topfloatSelector);
+            
+            for (i=0;i<topfloatsLength;i++) {
+                lastPage.previousSibling.appendChild(topfloats[i]);
+            }
+            while (lastPage.firstChild) {
+                lastPage.removeChild(lastPage.firstChild);
+            }
+            node = clonedNode.cloneNode(true);
+            lastPage.appendChild(node);
+            overflow = pagination.cutToFit(lastPage);
+        }
+        
         footnotes = lastPage.querySelectorAll(footnoteSelector);
         footnotesLength = footnotes.length;
         if (footnotesLength > 0) {
