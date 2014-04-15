@@ -39,6 +39,7 @@
         'numberPages': true,
         'divideContents': true,
         'footnoteSelector': '.pagination-footnote',
+        'pagebreakSelector': '.pagination-pagebreak'
         //        'topfloatSelector': '.pagination-topfloat',
         //        'marginnoteSelector': '.pagination-marginnote',
         //        'maxPageNumber': 10000,
@@ -212,6 +213,8 @@
             " + footnoteSelector + " > * > * {font-size: 0.7em; margin:.25em;}\
             " + footnoteSelector + " > * > *::before, " + footnoteSelector + "::before \
             {position: relative; top: -0.5em; font-size: 80%;}\
+            #pagination-toc-title:before {content:'Contents';}\
+            .pagination-toc-entry .pagination-toc-pagenumber {float:right;}\
             ";
 
     };
@@ -359,7 +362,7 @@
     pagination.cutToFit = function (contents) {
 
 
-        var coordinates, range, overflow;
+        var coordinates, range, overflow, manualPageBreak;
 
         contents.parentElement.scrollIntoView(true);
 
@@ -367,12 +370,22 @@
 
         contents.style[pagination.columnWidthTerm] = contents.clientWidth + 'px';
         contents.style[pagination.columnGapTerm] = '0px';
-        if (contents.clientWidth === contents.scrollWidth) {
-            return false;
+        
+        manualPageBreak = contents.querySelector(pagination.config('pagebreakSelector'));
+        if (manualPageBreak) {
+            console.log([manualPageBreak.getBoundingClientRect().left, contents.getBoundingClientRect().right])
         }
-        coordinates = contents.getBoundingClientRect();
-        contents.scrollIntoView(true);
-        range = pagination.caretRange(coordinates.right + 1, coordinates.top);
+        if (manualPageBreak && manualPageBreak.getBoundingClientRect().left < contents.getBoundingClientRect().right){
+            range = document.createRange();
+            range.setStartBefore(manualPageBreak);
+        }
+        else if (contents.clientWidth === contents.scrollWidth) {
+            return false;
+        } else {
+            coordinates = contents.getBoundingClientRect();
+            contents.scrollIntoView(true);
+            range = pagination.caretRange(coordinates.right + 1, coordinates.top);
+        }
         range.setEndAfter(contents.lastChild);
         overflow = range.extractContents();
 
@@ -564,7 +577,6 @@
     pagination.flowElement = function (overflow, container, pageCounterStyle) {
 
         setTimeout(function () {
-            // window.scrollTo(0, document.body.scrollHeight);
             pagination.fillPage(overflow, container, pageCounterStyle);
         }, 1);
     };
