@@ -461,7 +461,7 @@
         }, 1);
     };
 
-    pagination.applyBookLayoutNonDestructive = function () {
+    pagination.applyBookLayoutWithoutDivision = function () {
         // Create div for layout
         var layoutDiv = document.createElement('div'),
             bodyLayoutDiv = document.createElement('div'),
@@ -545,7 +545,7 @@
                             if (pagination.config('divideContents')) {
                                 pagination.applyBookLayout();
                             } else {
-                                pagination.applyBookLayoutNonDestructive();
+                                pagination.applyBookLayoutWithoutDivision();
                             }
                         }
                     }
