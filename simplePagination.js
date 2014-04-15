@@ -363,13 +363,8 @@
 
 
         var coordinates, range, overflow, manualPageBreak;
-
-        contents.previousSibling.scrollIntoView(true);
         
-
-        console.log([contents.parentElement.clientHeight, contents.previousSibling.clientHeight, contents.nextSibling.clientHeight]);
         contents.style.height = (contents.parentElement.clientHeight - contents.previousSibling.clientHeight - contents.nextSibling.clientHeight) + 'px';
-        console.log(contents.style.height);
         contents.style[pagination.columnWidthTerm] = contents.clientWidth + 'px';
         contents.style[pagination.columnGapTerm] = '0px';
         
@@ -382,8 +377,8 @@
         else if (contents.clientWidth === contents.scrollWidth) {
             return false;
         } else {
-            coordinates = contents.getBoundingClientRect();
             contents.scrollIntoView(true);
+            coordinates = contents.getBoundingClientRect();
             range = pagination.caretRange(coordinates.right + 1, coordinates.top);
         }
         range.setEndAfter(contents.lastChild);
@@ -483,7 +478,10 @@
             topfloats = clonedNode.querySelectorAll(topfloatSelector);
             
             for (i=0;i<topfloatsLength;i++) {
-                lastPage.previousSibling.appendChild(topfloats[i]);
+                while (topfloats[i].firstChild) {
+                    lastPage.previousSibling.appendChild(topfloats[i].firstChild);
+                }
+                
             }
             while (lastPage.firstChild) {
                 lastPage.removeChild(lastPage.firstChild);
@@ -721,6 +719,7 @@
                     function incrementCounter() {
                         counter++;
                         if (counter === len) {
+      
                             if (pagination.config('divideContents')) {
                                 pagination.applyBookLayout();
                             } else {
