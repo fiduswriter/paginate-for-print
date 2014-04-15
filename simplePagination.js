@@ -26,7 +26,7 @@
         'chapterStartMarker': 'h2',
         //'chapterTitleMarker': 'h2',
         'flowElement': 'document.body',
-        'alwaysEven': false,
+        'alwaysEven': true,
         //        'columns': 1,
         //        'enableFrontmatter': true,
         //        'enableTableOfFigures': false,
@@ -39,7 +39,7 @@
         //        'frontmatterContents': '',
         'autoStart': true,
         'numberPages': true,
-        'divideContents': false,
+        'divideContents': true,
         //        'footnoteSelector': '.pagination-footnote',
         //        'topfloatSelector': '.pagination-topfloat',
         //        'marginnoteSelector': '.pagination-marginnote',
@@ -465,7 +465,7 @@
     pagination.finish = function (container, pageCounterStyle) {
         var newContainer;
         if (pagination.config('alwaysEven') && container.querySelectorAll('.pagination-page').length % 2 === 1) {
-            container.appendChild(pagination.createPage(container, pageCounterStyle));
+            pagination.createPage(container, pageCounterStyle);
         }
         if (pagination.config('divideContents') && container.classList.contains('pagination-body')) {
             if (++pagination.currentFragment < pagination.bodyFlowFragments.length) {
