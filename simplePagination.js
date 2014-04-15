@@ -69,7 +69,9 @@
                 range.setStart(position.offsetNode, position.offset);
                 return range;
             };
-            pagination.columnWidthTerm = 'mozColumnWidth';
+            console.log('ff')
+            pagination.columnWidthTerm = 'MozColumnWidth';
+            pagination.columnGapTerm = 'MozColumnGap';
             var stylesheet = document.createElement('style');
             // Small fix for Firefox to not print first two pages on top of oneanother.
             stylesheet.innerHTML = "\
@@ -84,6 +86,7 @@
                 return document.caretRangeFromPoint(x, y);
             }
             pagination.columnWidthTerm = 'webkitColumnWidth';
+            pagination.columnGapTerm = 'webkitColumnGap';
         }
 
     };
@@ -187,7 +190,7 @@
             .pagination-contents-container {bottom:" + contentsBottomMargin + ";\
                height:" + contentsHeight + "}\
             .pagination-contents {height:" + contentsHeight + "; width:" + contentsWidth + ";}\
-            img {max-height: " + imageMaxHeight + "; max-width: " + imageMaxWidth + ";}\
+            img {max-height: " + imageMaxHeight + "; max-width: 100%;}\
             .pagination-pagenumber {bottom:" + pagenumberBottomMargin + ";}\
             .pagination-header {top:" + headerTopMargin + ";}\
             .pagination-page:nth-child(odd) .pagination-main-contents-container, \
@@ -311,18 +314,29 @@
 
     pagination.cutToFit = function (contents) {
         
+        
         var coordinates, range, overflow;
 
+        contents.parentElement.scrollIntoView(true);
+        
         contents.style.height = (contents.parentElement.clientHeight - contents.nextSibling.clientHeight) + 'px';
 
         contents.style[pagination.columnWidthTerm] = contents.clientWidth + 'px';
-
+        contents.style[pagination.columnGapTerm] =  '0px';
+        if (contents.clientWidth === contents.scrollWidth) {
+           return false;
+        }
         coordinates = contents.getBoundingClientRect();
-        range = pagination.caretRange(coordinates.right - 1, coordinates.bottom - 1); 
+        contents.scrollIntoView(true);
+        range = pagination.caretRange(coordinates.right+1 , coordinates.top); 
 
+           // if (!range) {
+             //   range = pagination.caretRange(coordinates.right-1, coordinates.bottom-1);
+            /*}
+        
             if (!range) {
-                range = pagination.caretRange(coordinates.left + 1, coordinates.bottom - 1);
-            }
+                range = pagination.caretRange(coordinates.left, coordinates.bottom);
+            }*/
             
 //        if (range !== null && contents.lastChild) {
             range.setEndAfter(contents.lastChild);
@@ -383,10 +397,10 @@
 
         lastPage.appendChild(node);
         console.log(lastPage.innerHTML);
-        lastPage.nextSibling.scrollIntoView(false);
+     //   lastPage.parentElement.scrollIntoView(true);
 
 //        if (lastPage.scrollHeight > lastPage.clientHeight) {
-            console.log('1');
+   //         console.log('1');
 
             overflow = pagination.cutToFit(lastPage);
 
@@ -409,7 +423,7 @@
                 }
 
                 lastPage.appendChild(clonedNode);
-                lastPage.nextSibling.scrollIntoView(false);
+                //lastPage.parentElement.scrollIntoView(true);
 
                 overflow = pagination.cutToFit(lastPage);
                 console.log(overflow);
@@ -437,7 +451,7 @@
             } else 
                 if (overflow.firstChild && lastPage.firstChild) {
                 setTimeout(function(){
-                pagination.fillPage(overflow, container, pageCounterStyle);},1000);
+                pagination.fillPage(overflow, container, pageCounterStyle);},1);
             } else {
                 pagination.finish(container, pageCounterStyle);
             }
