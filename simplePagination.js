@@ -39,7 +39,7 @@
         'numberPages': true,
         'divideContents': true,
         'footnoteSelector': '.pagination-footnote',
-        'pagebreakSelector': '.pagination-pagebreak'
+        'pagebreakSelector': '.pagination-pagebreak',
         //        'topfloatSelector': '.pagination-topfloat',
         //        'marginnoteSelector': '.pagination-marginnote',
         //        'maxPageNumber': 10000,
@@ -372,9 +372,7 @@
         contents.style[pagination.columnGapTerm] = '0px';
         
         manualPageBreak = contents.querySelector(pagination.config('pagebreakSelector'));
-        if (manualPageBreak) {
-            console.log([manualPageBreak.getBoundingClientRect().left, contents.getBoundingClientRect().right])
-        }
+
         if (manualPageBreak && manualPageBreak.getBoundingClientRect().left < contents.getBoundingClientRect().right){
             range = document.createRange();
             range.setStartBefore(manualPageBreak);
