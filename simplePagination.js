@@ -26,7 +26,7 @@
         'flowElement': 'document.body',
         'alwaysEven': true,
         //        'columns': 1,
-        //        'enableFrontmatter': true,
+        'enableFrontmatter': true,
         //        'enableTableOfFigures': false,
         //        'enableTableOfTables': false,
         //        'enableMarginNotes': false,
@@ -34,7 +34,7 @@
         //        'enableWordIndex': true,
         //        'bulkPagesToAdd': 50,
         //        'pagesToAddIncrementRatio': 1.4,
-        //        'frontmatterContents': '',
+        'frontmatterContents': '',
         'autoStart': true,
         'numberPages': true,
         'divideContents': true,
@@ -213,6 +213,51 @@
             " + footnoteSelector + " > * > *::before, " + footnoteSelector + "::before \
             {position: relative; top: -0.5em; font-size: 80%;}\
             ";
+
+    };
+
+    pagination.createToc = function () {
+        var tocDiv = document.createElement('div'),
+            tocTitleH1 = document.createElement('h1'),
+            tocItems = document.getElementById('pagination-layout').querySelectorAll('.pagination-body'),
+            tocItemDiv, tocItemTextSpan, itemType, tocItemPnSpan,
+            i;
+
+        if (!pagination.config('numberPages')) {
+            return false;
+        }
+        tocDiv.id = 'pagination-toc';
+        tocTitleH1.id = 'pagination-toc-title';
+        tocDiv.appendChild(tocTitleH1);
+
+        for (i = 0; i < tocItems.length; i++) {
+            if (pagination.matchesSelector(tocItems[i], '.pagination-chapter')) {
+                itemType = 'chapter';
+            } else if (pagination.matchesSelector(tocItems[i], '.pagination-section')) {
+                itemType = 'section';
+            } else {
+                continue;
+            }
+            tocItemDiv = document.createElement('div');
+            tocItemDiv.classList.add('pagination-toc-entry');
+            tocItemTextSpan = document.createElement('span');
+            tocItemTextSpan.classList.add('pagination-toc-text');
+
+            tocItemTextSpan.appendChild(document.createTextNode(tocItems[i].querySelector('.pagination-header-' + itemType).textContent.trim()));
+            tocItemDiv.appendChild(tocItemTextSpan);
+
+            tocItemPnSpan = document.createElement('span');
+            tocItemPnSpan.classList.add('pagination-toc-pagenumber');
+
+            tocItemPnSpan.appendChild(document.createTextNode(tocItems[i].querySelector('.pagination-pagenumber').textContent.trim()));
+
+
+            tocItemDiv.appendChild(tocItemPnSpan);
+
+            tocDiv.appendChild(tocItemDiv);
+        }
+
+        return tocDiv;
 
     };
 
@@ -465,30 +510,51 @@
 
     };
 
+    pagination.paginateDivision = function (layoutDiv, pageCounterStyle) {
+        if (++pagination.currentFragment < pagination.bodyFlowObjects.length) {
+            newContainer = document.createElement('div');
+            layoutDiv.appendChild(newContainer);
+            newContainer.classList.add('pagination-body');
+            newContainer.classList.add('pagination-body-' + pagination.currentFragment);
+            if (pagination.bodyFlowObjects[pagination.currentFragment].section) {
+                pagination.currentSection = pagination.bodyFlowObjects[pagination.currentFragment].section;
+                newContainer.classList.add('pagination-section');
+            }
+            if (pagination.bodyFlowObjects[pagination.currentFragment].chapter) {
+                pagination.currentChapter = pagination.bodyFlowObjects[pagination.currentFragment].chapter;
+                newContainer.classList.add('pagination-chapter');
+            }
+            pagination.flowElement(pagination.bodyFlowObjects[pagination.currentFragment].fragment, newContainer, pageCounterStyle, pagination.bodyFlowObjects[pagination.currentFragment].section, pagination.bodyFlowObjects[pagination.currentFragment].chapter);
+        } else {
+            pagination.currentChapter = false;
+            pagination.currentSection = false;
+            pagination.pageCounters[pageCounterStyle].numberPages();
+            if (pagination.config('enableFrontmatter')) {
+                layoutDiv.insertBefore(document.createElement('div'), layoutDiv.firstChild);
+                layoutDiv.firstChild.classList.add('pagination-frontmatter');
+                tempNode = document.createElement('div');
+                tempNode.innerHTML = pagination.config('frontmatterContents');
+                flowObject = {
+                    fragment: document.createDocumentFragment(),
+                }
+                while (tempNode.firstChild) {
+                    flowObject.fragment.appendChild(tempNode.firstChild);
+                }
+                flowObject.fragment.appendChild(pagination.createToc());
+                pagination.flowElement(flowObject.fragment, layoutDiv.firstChild, 'roman');
+            }
+            window.scrollTo(0, 0);
+        }
+
+    };
+
     pagination.finish = function (container, pageCounterStyle) {
-        var newContainer;
+        var newContainer, layoutDiv = container.parentElement;
         if (pagination.config('alwaysEven') && container.querySelectorAll('.pagination-page').length % 2 === 1) {
             pagination.createPage(container, pageCounterStyle);
         }
         if (pagination.config('divideContents') && container.classList.contains('pagination-body')) {
-            if (++pagination.currentFragment < pagination.bodyFlowObjects.length) {
-                newContainer = document.createElement('div');
-                container.parentElement.appendChild(newContainer);
-                newContainer.classList.add('pagination-body');
-                newContainer.classList.add('pagination-body-' + pagination.currentFragment);
-                if (pagination.bodyFlowObjects[pagination.currentFragment].section) {
-                    pagination.currentSection = pagination.bodyFlowObjects[pagination.currentFragment].section;
-                    newContainer.classList.add('pagination-section');
-                }
-                if (pagination.bodyFlowObjects[pagination.currentFragment].chapter) {
-                    pagination.currentChapter = pagination.bodyFlowObjects[pagination.currentFragment].chapter;
-                    newContainer.classList.add('pagination-chapter');
-                }
-                pagination.flowElement(pagination.bodyFlowObjects[pagination.currentFragment].fragment, newContainer, pageCounterStyle, pagination.bodyFlowObjects[pagination.currentFragment].section, pagination.bodyFlowObjects[pagination.currentFragment].chapter);
-            } else {
-                window.scrollTo(0, 0);
-                pagination.pageCounters[pageCounterStyle].numberPages();
-            }
+            pagination.paginateDivision(layoutDiv, pageCounterStyle);
         } else {
             window.scrollTo(0, 0);
             pagination.pageCounters[pageCounterStyle].numberPages();
@@ -498,7 +564,7 @@
     pagination.flowElement = function (overflow, container, pageCounterStyle) {
 
         setTimeout(function () {
-            window.scrollTo(0, document.body.scrollHeight);
+            // window.scrollTo(0, document.body.scrollHeight);
             pagination.fillPage(overflow, container, pageCounterStyle);
         }, 1);
     };
@@ -536,7 +602,7 @@
             nextSection = false;
 
         pagination.bodyFlowObjects = [];
-        pagination.currentFragment = 0;
+        pagination.currentFragment = -1;
         layoutDiv.id = 'pagination-layout';
 
         for (i = 0; i < dividers.length; i++) {
@@ -605,20 +671,7 @@
 
         document.body.appendChild(layoutDiv);
 
-
-        layoutDiv.appendChild(document.createElement('div'));
-        layoutDiv.firstChild.classList.add('pagination-body');
-        layoutDiv.firstChild.classList.add('pagination-body-0');
-        if (pagination.bodyFlowObjects[pagination.currentFragment].section) {
-            pagination.currentSection = pagination.bodyFlowObjects[pagination.currentFragment].section;
-            layoutDiv.firstChild.classList.add('pagination-section');
-        }
-        if (pagination.bodyFlowObjects[pagination.currentFragment].chapter) {
-            pagination.currentChapter = pagination.bodyFlowObjects[pagination.currentFragment].chapter;
-            layoutDiv.firstChild.classList.add('pagination-chapter');
-        }
-        pagination.flowElement(pagination.bodyFlowObjects[pagination.currentFragment].fragment, layoutDiv.firstChild, 'arab');
-
+        pagination.paginateDivision(layoutDiv, 'arab');
 
     };
 
