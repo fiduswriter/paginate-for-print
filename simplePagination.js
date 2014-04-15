@@ -329,16 +329,6 @@
      * body contents.
      */
 
-    pagination.pageCounters.arab = new pagination.pageCounterCreator(
-        'arab');
-    // arab is the page counter used by the main body contents.
-
-    pagination.pageCounters.roman = new pagination.pageCounterCreator(
-        'roman',
-        pagination.romanize);
-    // roman is the page counter used by the frontmatter.    
-
-
     pagination.romanize = function () {
         // Create roman numeral representations of numbers.
         var digits = String(+this.value).split(""),
@@ -354,7 +344,17 @@
             roman = (key[+digits.pop() + (i * 10)] || "") + roman;
         }
         return new Array(+digits.join("") + 1).join("M") + roman;
-    };
+    };    
+    
+    pagination.pageCounters.arab = new pagination.pageCounterCreator(
+        'arab');
+    // arab is the page counter used by the main body contents.
+
+    pagination.pageCounters.roman = new pagination.pageCounterCreator(
+        'roman',
+        pagination.romanize);
+    // roman is the page counter used by the frontmatter.    
+
 
     pagination.cutToFit = function (contents) {
 
@@ -556,7 +556,7 @@
         if (pagination.config('divideContents') && container.classList.contains('pagination-body')) {
             pagination.paginateDivision(layoutDiv, pageCounterStyle);
         } else {
-            window.scrollTo(0, 0);
+             window.scrollTo(0, 0);
             pagination.pageCounters[pageCounterStyle].numberPages();
         }
     };
