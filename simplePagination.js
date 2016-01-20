@@ -13,7 +13,7 @@
         defaults,
         pagination = {};
 
-    /* pagination is the object that contains the namespace used by 
+    /* pagination is the object that contains the namespace used by
      * pagination.js.
      */
 
@@ -99,7 +99,7 @@
     pagination.pageStyleSheet = document.createElement('style');
 
     pagination.initiate = function () {
-        /* Initiate pagination.js by importing user set config options and 
+        /* Initiate pagination.js by importing user set config options and
          * setting basic CSS style.
          */
         this.setStyle();
@@ -303,7 +303,7 @@
     };
 
     pagination.pageCounterCreator.prototype.incrementAndShow = function () {
-        /* Increment the page count by one and return the reuslt page count 
+        /* Increment the page count by one and return the reuslt page count
          * using the show function.
          */
         this.value++;
@@ -312,7 +312,7 @@
 
 
     pagination.pageCounterCreator.prototype.numberPages = function () {
-        /* If the pages associated with this page counter need to be updated, 
+        /* If the pages associated with this page counter need to be updated,
          * go through all of them from the start of the book and number them,
          * thereby potentially removing old page numbers.
          */
@@ -356,13 +356,13 @@
     pagination.pageCounters.roman = new pagination.pageCounterCreator(
         'roman',
         pagination.romanize);
-    // roman is the page counter used by the frontmatter.    
+    // roman is the page counter used by the frontmatter.
 
 
     pagination.cutToFit = function (contents) {
 
 
-        var coordinates, range, overflow, manualPageBreak;
+        var coordinates, range, overflow, manualPageBreak, previousLICount;
 
         contents.style.height = (contents.parentElement.clientHeight - contents.previousSibling.clientHeight - contents.nextSibling.clientHeight) + 'px';
         contents.style[pagination.columnWidthTerm] = contents.clientWidth + 'px';
@@ -382,6 +382,8 @@
         }
         range.setEndAfter(contents.lastChild);
         overflow = range.extractContents();
+        previousLICount = countOLItemsAndFixLI(contents);
+        applyInitialOLcount(overflow,previousLICount);
 
         if (!contents.lastChild || (contents.textContent.trim().length === 0 && contents.querySelectorAll('img,svg,canvas').length === 0)) {
             contents.appendChild(overflow);
@@ -621,6 +623,45 @@
         pagination.flowElement(flowFragment, bodyLayoutDiv, 'arab');
     };
 
+    function countOLItemsAndFixLI (element, countList) {
+        var start = 1;
+        if (typeof countList==='undefined') {
+          countList = [];
+        }
+        if (element.nodeName === 'OL') {
+            if (element.hasAttribute('start')) {
+                start = parseInt(element.getAttribute('start'));
+            }
+            if (element.lastElementChild.textContent.length===0) {
+                element.removeChild(element.lastElementChild);
+            }
+            countList.push(start + element.childElementCount);
+        } else if (element.nodeName === 'UL' && element.lastElementChild.textContent.length===0) {
+                  element.removeChild(element.lastElementChild);
+        }
+
+        if (element.childElementCount > 0) {
+            return countOLItemsAndFixLI(element.lastElementChild, countList);
+        } else {
+            return countList;
+        }
+
+    }
+
+    function applyInitialOLcount (element, countList) {
+        if (countList.length===0) {
+            return;
+        }
+        if (element.nodeName === 'OL') {
+            element.setAttribute('start',countList.shift());
+        }
+        if (element.childElementCount > 0) {
+            applyInitialOLcount(element.firstElementChild, countList);
+        } else {
+            return;
+        }
+    }
+
     pagination.applyBookLayout = function () {
         // Create div for layout
         var layoutDiv = document.createElement('div'),
@@ -654,6 +695,7 @@
             range.setStart(flowedElement.firstChild, 0);
             range.setEnd(dividers[i], 0);
             flowObject.fragment = range.extractContents();
+            console.log(['one',flowObject])
             pagination.bodyFlowObjects.push(flowObject);
 
             extraElement = flowObject.fragment.querySelectorAll(dividerSelector)[1];
@@ -737,7 +779,11 @@
                         img.addEventListener('load', incrementCounter, false);
                     });
                     if (len === 0) {
-                        incrementCounter();
+                        if (pagination.config('divideContents')) {
+                            pagination.applyBookLayout();
+                        } else {
+                            pagination.applyBookLayoutWithoutDivision();
+                        }
                     }
                 }
             }
@@ -747,6 +793,6 @@
     exports.pagination = pagination;
 }).call(this);
 
-if (typeof paginationConfig === 'undefined' || !paginationConfig.hasOwnProperty('autostart') || paginationConfig.autoStart === false) {
+if (typeof paginationConfig === 'undefined' || !paginationConfig.hasOwnProperty('autoStart') || paginationConfig.autoStart === true) {
     pagination.initiate();
 }
