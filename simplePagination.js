@@ -384,7 +384,6 @@
             if (element.lastElementChild.textContent.length===0) {
                 element.removeChild(element.lastElementChild);
             } else {
-              console.log([element.lastElementChild,element.lastChild]);
                 start--;
                 hideFirstLI = true;
             }
@@ -453,7 +452,6 @@
             coordinates = contents.getBoundingClientRect();
             range = pagination.caretRange(coordinates.right + 1, coordinates.top);
         }
-        console.log(range.startContainer.nodeName);
         if(range.startContainer.nodeName==='OL' || range.startContainer.nodeName==='UL') {
             // We are cutting from inside a List, don't touch the innermost list items.
             ignoreLastLIcut = true;
@@ -464,7 +462,9 @@
         if (ignoreLastLIcut) {
           // Because the cut happened exactly between two LI items, don't try to unify the two lowest level LIs.
           cutLIs[cutLIs.length-1].hideFirstLI = false;
-          cutLIs[cutLIs.length-1].start++;
+          if (cutLIs[cutLIs.length-1].start) {
+              cutLIs[cutLIs.length-1].start++;
+          }
         }
         applyInitialOLcount(overflow, cutLIs);
 
