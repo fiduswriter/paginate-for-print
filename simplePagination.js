@@ -60,19 +60,11 @@
 
     pagination.setBrowserSpecifics = function() {
 
-        if (document.caretPositionFromPoint) {
+        if (navigator.userAgent.toLowerCase().indexOf('firefox') > -1) {
             // Firefox
-            pagination.caretRange = function(x, y) {
-                var position = document.caretPositionFromPoint(x, y),
-                    range = document.createRange();
-                range.setStart(position.offsetNode, position.offset);
-                return range;
-            };
             pagination.matchesSelector = function(element, selector) {
                 return element.mozMatchesSelector(selector);
             };
-            pagination.columnWidthTerm = 'MozColumnWidth';
-            pagination.columnGapTerm = 'MozColumnGap';
             var stylesheet = document.createElement('style');
             // Small fix for Firefox to not print first two pages on top of oneanother.
             stylesheet.innerHTML =
@@ -83,15 +75,10 @@
             ";
             document.head.appendChild(stylesheet);
         } else {
-            // Webkit + Chrome
-            pagination.caretRange = function(x, y) {
-                return document.caretRangeFromPoint(x, y);
-            }
+            // Webkit + Chrome + Edge
             pagination.matchesSelector = function(element, selector) {
                 return element.webkitMatchesSelector(selector);
             };
-            pagination.columnWidthTerm = 'webkitColumnWidth';
-            pagination.columnGapTerm = 'webkitColumnGap';
         }
 
     };
@@ -465,6 +452,9 @@
     }
 
     function applyInitialOLcount(element, countList) {
+        if (element.nodeName === '#document-fragment') {
+            element = element.childNodes[0];
+        }
         var listCount;
         if (countList.length === 0) {
             return;
@@ -488,46 +478,135 @@
         }
     }
 
+    pagination.findPrevNode = function(node) {
+        if (node.previousSibling) {
+            return node.previousSibling;
+        } else {
+            return pagination.findPrevNode(node.parentElement);
+        }
+    }
+
+    // Go through a node (contents) and find the exact position where it goes lower than bottom.
+    pagination.findPageBreak = function(contents, bottom) {
+        var contentCoords, found, prevNode;
+        if (contents.nodeType === 1) {
+            contentCoords = contents.getBoundingClientRect();
+            if (contentCoords.top < bottom) {
+                if (contentCoords.bottom > bottom) {
+                    found = false;
+                    var i = 0;
+                    while (found === false && i < contents.childNodes.length) {
+                        found = pagination.findPageBreak(contents.childNodes[
+                            i], bottom);
+                        i++;
+                    }
+                    if (found) {
+                        return found;
+                    }
+                } else {
+                    return false
+                }
+            }
+            prevNode = pagination.findPrevNode(contents);
+            return {
+                node: prevNode,
+                offset: prevNode.length ? prevNode.length : prevNode.childNodes
+                    .length
+            }
+
+        } else if (contents.nodeType === 3) {
+            var range = document.createRange(),
+                offset = contents.length;
+            range.setStart(contents, 0);
+            range.setEnd(contents, offset);
+            var contentCoords = range.getBoundingClientRect();
+            if (contentCoords.bottom === contentCoords.top) {
+                // Some text node that doesn't have any output.
+                return false;
+            } else if (contentCoords.top < bottom) {
+                if (contentCoords.bottom > bottom) {
+                    found = false;
+                    while (found === false && offset > 0) {
+                        offset--;
+                        range.setEnd(contents, offset);
+                        contentCoords = range.getBoundingClientRect();
+                        if (contentCoords.bottom <= bottom) {
+                            found = {
+                                node: contents,
+                                offset: offset
+                            };
+                        }
+                    }
+                    if (found) {
+                        return found;
+                    }
+
+                } else {
+                    return false;
+                }
+            }
+            prevNode = pagination.findPrevNode(contents);
+            return {
+                node: prevNode,
+                offset: prevNode.length ? prevNode.length : prevNode.childNodes
+                    .length
+            }
+        } else {
+            return false;
+        }
+    }
+
 
     pagination.cutToFit = function(contents) {
 
-
-        var coordinates, range, overflow, manualPageBreak,
+        var range, overflow, manualPageBreak,
             ignoreLastLIcut = false,
-            cutLIs;
+            cutLIs, pageBreak,
+            // ContentHeight = height of page - height of top floats - height of footnotes.
+            contentHeight = (contents.parentElement.clientHeight -
+                contents.previousSibling.clientHeight - contents.nextSibling
+                .clientHeight),
+            boundingRect, bottom;
 
-        contents.style.height = (contents.parentElement.clientHeight -
-            contents.previousSibling.clientHeight - contents.nextSibling
-            .clientHeight) + 'px';
-        contents.style[pagination.columnWidthTerm] = contents.clientWidth +
-            'px';
-        contents.style[pagination.columnGapTerm] = '0px';
-
+        // Set height temporarily to "auto" so the page flows beyond where
+        // it should end and we can ginf the page break.
+        contents.style.height = "auto";
+        boundingRect = contents.getBoundingClientRect();
+        bottom = boundingRect.top + contentHeight;
 
         manualPageBreak = contents.querySelector(pagination.config(
             'pagebreakSelector'));
 
-        if (manualPageBreak && manualPageBreak.getBoundingClientRect().left <
-            contents.getBoundingClientRect().right) {
+        if (manualPageBreak && manualPageBreak.getBoundingClientRect().top <
+            bottom) {
             range = document.createRange();
             range.setStartBefore(manualPageBreak);
-        } else if (contents.clientWidth === contents.scrollWidth) {
+        } else if (boundingRect.bottom <= bottom) {
+            contents.style.height = contentHeight + "px";
             return false;
         } else {
-            contents.scrollIntoView(true);
-            coordinates = contents.getBoundingClientRect();
-            range = pagination.caretRange(coordinates.right + 1,
-                coordinates.top);
+            pageBreak = pagination.findPageBreak(contents, bottom);
+            if (!pageBreak) {
+                contents.style.height = contentHeight + "px";
+                return false;
+            }
+            range = document.createRange();
+            range.setStart(pageBreak.node, pageBreak.offset);
         }
+        // Set height to contentHeight
+        contents.style.height = contentHeight + "px";
+        // We find that the first item is an OL/UL which may have started on the previous page.
         if (range.startContainer.nodeName === 'OL' || range.startContainer
-            .nodeName === 'UL') {
+            .nodeName === 'UL' || range.startContainer.nodeName ===
+            '#text' &&
+            range.startContainer.length === range.startOffset) {
             // We are cutting from inside a List, don't touch the innermost list items.
             ignoreLastLIcut = true;
         }
         range.setEndAfter(contents.lastChild);
         overflow = range.extractContents();
         cutLIs = countOLItemsAndFixLI(contents);
-        if (ignoreLastLIcut) {
+        if (cutLIs.length > 0 && ignoreLastLIcut) {
             // Because the cut happened exactly between two LI items, don't try to unify the two lowest level LIs.
             cutLIs[cutLIs.length - 1].hideFirstLI = false;
             if (cutLIs[cutLIs.length - 1].start) {
@@ -542,8 +621,6 @@
             contents.appendChild(overflow);
             overflow = false;
         }
-        contents.style[pagination.columnWidthTerm] = "auto";
-
         return overflow;
     };
 
@@ -938,12 +1015,11 @@
                 }
             }
         );
+        exports = pagination;
     };
 
     if (typeof exports !== 'undefined') {
-        if (typeof module !== 'undefined' && module.exports) {
-            exports = module.exports = pagination;
-        }
+        if (typeof module !== 'undefined' && module.exports) {}
         exports.pagination = pagination;
     } else {
         // `window` in the browser, or `exports` on the server
