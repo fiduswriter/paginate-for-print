@@ -99,56 +99,46 @@
          */
         var stylesheet = document.createElement('style'),
             footnoteSelector = pagination.config('footnoteSelector');
-        stylesheet.innerHTML =
-        ".pagination-footnotes " +
-            footnoteSelector +
-            " {display: block;}\n" +
-        ".pagination-contents " +
-            footnoteSelector +
-            " > * {display:none;}\n" +
-        ".pagination-main-contents-container " +
-            footnoteSelector +
-            ", figure {\
-            -webkit-column-break-inside: avoid;\
-            page-break-inside: avoid;\
-        }\
-        body {\
-            counter-reset: pagination-footnote pagination-footnote-reference;\
-        }\
-        .pagination-contents " +
-            footnoteSelector +
-            "::before {\
-            counter-increment: pagination-footnote-reference;\
-            content: counter(pagination-footnote-reference);\
-        }\
-        " +
-            footnoteSelector +
-            " > * > *:first-child::before {\
-            counter-increment: pagination-footnote;\
-            content: counter(pagination-footnote);\
-        }\
-        .pagination-page {\
-            position: relative;\
-        }\
-        .pagination-page {\
-            page-break-after: always;\
-            page-break-before: always;\
-            margin-left: auto;\
-            margin-right: auto;\
-        }\
-        .pagination-page:first-child {\
-            page-break-before: avoid;\
-        }\
-        .pagination-page:last-child {\
-            page-break-after: avoid;\
-        }\
-        .pagination-main-contents-container, .pagination-pagenumber, .pagination-header {\
-            position: absolute;\
-        }\
-        li.hide {\
-          list-style-type: none;\
-        }\
-        ";
+        stylesheet.innerHTML = `
+.pagination-footnotes ${footnoteSelector} {display: block;}
+.pagination-contents ${footnoteSelector} > * {display:none;}
+.pagination-main-contents-container ${footnoteSelector}, figure {
+    -webkit-column-break-inside: avoid;
+    page-break-inside: avoid;
+}
+body {
+    counter-reset: pagination-footnote pagination-footnote-reference;
+}
+.pagination-contents ${footnoteSelector}::before {
+    counter-increment: pagination-footnote-reference;
+    content: counter(pagination-footnote-reference);
+}
+${footnoteSelector} > * > *:first-child::before {
+    counter-increment: pagination-footnote;
+    content: counter(pagination-footnote);
+}
+.pagination-page {
+    position: relative;
+}
+.pagination-page {
+    page-break-after: always;
+    page-break-before: always;
+    margin-left: auto;
+    margin-right: auto;
+}
+.pagination-page:first-child {
+    page-break-before: avoid;
+}
+.pagination-page:last-child {
+    page-break-after: avoid;
+}
+.pagination-main-contents-container, .pagination-pagenumber, .pagination-header {
+    position: absolute;
+}
+li.hide {
+    list-style-type: none;
+}
+        `;
         document.head.appendChild(stylesheet);
     };
 
@@ -181,64 +171,60 @@
             imageMaxWidth = contentsWidthNumber - .1 + unit,
             footnoteSelector = pagination.config('footnoteSelector');
 
-        pagination.pageStyleSheet.innerHTML =
-            "\
-            .pagination-page {height:" + pageHeight +
-            "; width:" + pageWidth +
-            ";\
-            background-color: #fff;}\
-            @page {size:" +
-            pageWidth + " " + pageHeight +
-            ";}\
-            body {background-color: #efefef; margin:0;}\
-            @media screen{.pagination-page {border:solid 1px #000; margin-bottom:.2in;}} \
-            .pagination-main-contents-container {width:" +
-            contentsWidth + "; height:" + contentsHeight +
-            ";\
-                bottom:" + contentsBottomMargin +
-            ";} \
-            .pagination-contents-container {bottom:" +
-            contentsBottomMargin + ";\
-               height:" +
-            contentsHeight +
-            "}\
-            .pagination-contents {height:" +
-            contentsHeight + "; width:" + contentsWidth +
-            ";}\
-            img {max-height: " + imageMaxHeight +
-            "; max-width: 100%;}\
-            .pagination-pagenumber {bottom:" +
-            pagenumberBottomMargin +
-            ";}\
-            .pagination-header {top:" +
-            headerTopMargin +
-            ";}\
-            .pagination-page:nth-child(odd) .pagination-main-contents-container, \
-            .pagination-page:nth-child(odd) .pagination-pagenumber, \
-            .pagination-page:nth-child(odd) .pagination-header {right:" +
-            outerMargin + ";left:" + innerMargin +
-            ";}\
-            .pagination-page:nth-child(even) .pagination-main-contents-container, \
-            .pagination-page:nth-child(even) .pagination-pagenumber, \
-            .pagination-page:nth-child(even) .pagination-header {right:" +
-            innerMargin + ";left:" + outerMargin +
-            ";}\
-            .pagination-page:nth-child(odd) .pagination-pagenumber,\
-            .pagination-page:nth-child(odd) .pagination-header {text-align:right;}\
-            .pagination-page:nth-child(odd) .pagination-header-section {display:none;}\
-            .pagination-page:nth-child(even) .pagination-header-chapter {display:none;}\
-            .pagination-page:nth-child(even) .pagination-pagenumber,\
-            .pagination-page:nth-child(even) .pagination-header { text-align:left;}\
-            " +
-            footnoteSelector +
-            " > * > * {font-size: 0.7em; margin:.25em;}\
-            " +
-            footnoteSelector + " > * > *::before, " + footnoteSelector +
-            "::before \
-            {position: relative; top: -0.5em; font-size: 80%;}\
-            #pagination-toc-title:before {content:'Contents';}\
-            .pagination-toc-entry .pagination-toc-pagenumber {float:right;}\
-            ";
+        pagination.pageStyleSheet.innerHTML = `
+.pagination-page {height: ${pageHeight}; width: ${pageWidth};background-color: #fff;}
+@page {size:${pageWidth} ${pageHeight};}
+body {background-color: #efefef; margin:0;}
+@media screen{.pagination-page {border:solid 1px #000; margin-bottom:.2in;}}
+.pagination-main-contents-container {
+    width: ${contentsWidth};
+    height: ${contentsHeight};
+    bottom: ${contentsBottomMargin};
+}
+.pagination-contents-container {
+    bottom: ${contentsBottomMargin};
+    height: ${contentsHeight};
+}
+.pagination-contents {
+    height: ${contentsHeight};
+    width: ${contentsWidth};
+}
+img {max-height: ${imageMaxHeight}; max-width: 100%;}
+.pagination-pagenumber {
+    bottom: ${pagenumberBottomMargin};
+}
+.pagination-header {
+    top: ${headerTopMargin};
+}
+.pagination-page:nth-child(odd) .pagination-main-contents-container,
+.pagination-page:nth-child(odd) .pagination-pagenumber,
+.pagination-page:nth-child(odd) .pagination-header {
+    right: ${outerMargin};
+    left: ${innerMargin};
+}
+.pagination-page:nth-child(even) .pagination-main-contents-container,
+.pagination-page:nth-child(even) .pagination-pagenumber,
+.pagination-page:nth-child(even) .pagination-header {
+    right: ${innerMargin};
+    left: ${outerMargin};
+}
+.pagination-page:nth-child(odd) .pagination-pagenumber,
+.pagination-page:nth-child(odd) .pagination-header {text-align:right;}
+.pagination-page:nth-child(odd) .pagination-header-section {display:none;}
+.pagination-page:nth-child(even) .pagination-header-chapter {display:none;}
+.pagination-page:nth-child(even) .pagination-pagenumber,
+.pagination-page:nth-child(even) .pagination-header { text-align:left;}
+${footnoteSelector} > * > * {font-size: 0.7em; margin:.25em;}
+${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
+    position: relative;
+    top: -0.5em;
+    font-size: 80%;
+}
+#pagination-toc-title:before {
+    content:'Contents';
+}
+.pagination-toc-entry .pagination-toc-pagenumber {float:right;}
+            `;
 
     };
 
