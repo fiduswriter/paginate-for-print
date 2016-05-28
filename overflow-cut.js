@@ -14,7 +14,7 @@ function flowElement(node, container) {
         isOverflowing = el.clientHeight < (el.scrollHeight - 10);
         el.style.overflow = curOverflow;
         return isOverflowing;
-    };
+    }
 
 
     function createPage() {

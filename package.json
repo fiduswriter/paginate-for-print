@@ -1,0 +1,13 @@
+{
+  "name": "seimple-pagination",
+  "version": "0.0.1",
+  "author": "Johannes Wilm",
+  "license": "AGPL",
+  "private": true,
+  "dependencies": {
+    "jshint": "2.9.2"
+  },
+  "jshintConfig": {
+    "esversion": 6
+  }
+}

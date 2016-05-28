@@ -6,8 +6,7 @@
  * Please see pagination.js for usage instructions. Only basic options are available.
  */
 (function() {
-
-
+    'use strict';
 
     //    var exports = this,
     var pagination = {};
@@ -167,8 +166,8 @@ li.hide {
             unit,
             headerTopMargin = pagination.config('headerTopMargin') +
             unit,
-            imageMaxHeight = contentsHeightNumber - .1 + unit,
-            imageMaxWidth = contentsWidthNumber - .1 + unit,
+            imageMaxHeight = contentsHeightNumber - 0.1 + unit,
+            imageMaxWidth = contentsWidthNumber - 0.1 + unit,
             footnoteSelector = pagination.config('footnoteSelector');
 
         pagination.pageStyleSheet.innerHTML = `
@@ -461,7 +460,7 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
         } else {
             return pagination.findPrevNode(node.parentElement);
         }
-    }
+    };
 
     // Go through a node (contents) and find the exact position where it goes lower than bottom.
     pagination.findPageBreak = function(contents, bottom) {
@@ -481,22 +480,21 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
                         return found;
                     }
                 } else {
-                    return false
+                    return false;
                 }
             }
             prevNode = pagination.findPrevNode(contents);
             return {
                 node: prevNode,
-                offset: prevNode.length ? prevNode.length : prevNode.childNodes
-                    .length
-            }
+                offset: prevNode.length ? prevNode.length : prevNode.childNodes.length
+            };
 
         } else if (contents.nodeType === 3) {
             var range = document.createRange(),
                 offset = contents.length;
             range.setStart(contents, 0);
             range.setEnd(contents, offset);
-            var contentCoords = range.getBoundingClientRect();
+            contentCoords = range.getBoundingClientRect();
             if (contentCoords.bottom === contentCoords.top) {
                 // Some text node that doesn't have any output.
                 return false;
@@ -527,11 +525,11 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
                 node: prevNode,
                 offset: prevNode.length ? prevNode.length : prevNode.childNodes
                     .length
-            }
+            };
         } else {
             return false;
         }
-    }
+    };
 
     pagination.cutToFit = function(contents) {
 
@@ -624,7 +622,7 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
 
             if (pagination.currentChapter) {
 
-                chapterHeader = document.createElement('span');
+                var chapterHeader = document.createElement('span');
 
                 chapterHeader.classList.add('pagination-header-chapter');
                 chapterHeader.appendChild(pagination.currentChapter.cloneNode(
@@ -634,7 +632,7 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
 
             if (pagination.currentSection) {
 
-                sectionHeader = document.createElement('span');
+                var sectionHeader = document.createElement('span');
                 sectionHeader.classList.add('pagination-header-section');
                 sectionHeader.appendChild(pagination.currentSection.cloneNode(
                     true));
@@ -679,7 +677,7 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
             clonedNode = node.cloneNode(true),
             footnoteSelector = pagination.config('footnoteSelector'),
             topfloatSelector = pagination.config('topfloatSelector'),
-            topfloatsLength, topfloats,
+            topfloatsLength, topfloats, overflow,
             footnotes, footnotesLength, clonedFootnote, i, oldFn,
             fnHeightTotal;
 
@@ -758,12 +756,11 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
         } else {
             pagination.finish(container, pageCounterStyle);
         }
-
     };
 
     pagination.paginateDivision = function(layoutDiv, pageCounterStyle) {
         if (++pagination.currentFragment < pagination.bodyFlowObjects.length) {
-            newContainer = document.createElement('div');
+            var newContainer = document.createElement('div');
             layoutDiv.appendChild(newContainer);
             newContainer.classList.add('pagination-body');
             newContainer.classList.add('pagination-body-' + pagination.currentFragment);
@@ -792,12 +789,12 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
                     layoutDiv.firstChild);
                 layoutDiv.firstChild.classList.add(
                     'pagination-frontmatter');
-                tempNode = document.createElement('div');
+                var tempNode = document.createElement('div');
                 tempNode.innerHTML = pagination.config(
                     'frontmatterContents');
-                flowObject = {
+                var flowObject = {
                     fragment: document.createDocumentFragment(),
-                }
+                };
                 while (tempNode.firstChild) {
                     flowObject.fragment.appendChild(tempNode.firstChild);
                 }
@@ -954,6 +951,20 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
 
     };
 
+    function incrementCounter(counter, len) {
+        counter++;
+        if (counter === len) {
+
+            if (pagination.config(
+                    'divideContents')) {
+                pagination.applyBookLayout();
+            } else {
+                pagination.applyBookLayoutWithoutDivision();
+            }
+        }
+        return counter;
+    }
+
     pagination.bindEvents = function() {
         document.addEventListener(
             "readystatechange",
@@ -964,33 +975,23 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
                             len = imgs.length,
                             counter = 0;
 
-                        function incrementCounter() {
-                            counter++;
-                            if (counter === len) {
-
-                                if (pagination.config(
-                                        'divideContents')) {
-                                    pagination.applyBookLayout();
-                                } else {
-                                    pagination.applyBookLayoutWithoutDivision();
-                                }
-                            }
-                        }
-
                         [].forEach.call(imgs, function(img) {
                             img.addEventListener('load',
-                                incrementCounter, false
+                                function(){
+                                    counter = incrementCounter(counter, len);
+                                },
+                                false
                             );
                         });
                         if (len === 0) {
                             counter = -1;
-                            incrementCounter();
+                            counter = incrementCounter(counter, len);
                         }
                     }
                 }
             }
         );
-        exports = pagination;
+        var exports = pagination;
     };
 
     if (typeof exports !== 'undefined') {
