@@ -67,12 +67,7 @@
             };
             var stylesheet = document.createElement('style');
             // Small fix for Firefox to not print first two pages on top of oneanother.
-            stylesheet.innerHTML =
-                "\
-            .pagination-page:first-child {\
-                page-break-before: always;\
-            }\
-            ";
+            stylesheet.innerHTML = ".pagination-page:first-child {page-break-before: always;}";
             document.head.appendChild(stylesheet);
         } else {
             // Webkit + Chrome + Edge
@@ -104,18 +99,14 @@
          */
         var stylesheet = document.createElement('style'),
             footnoteSelector = pagination.config('footnoteSelector');
-        stylesheet.innerHTML = "\
-        .pagination-footnotes " +
+        stylesheet.innerHTML =
+        ".pagination-footnotes " +
             footnoteSelector +
-            " {\
-            display: block;\
-        }\
-        .pagination-contents " +
+            " {display: block;}\n" +
+        ".pagination-contents " +
             footnoteSelector +
-            " > * {\
-            display:none;\
-        }\
-        .pagination-main-contents-container " +
+            " > * {display:none;}\n" +
+        ".pagination-main-contents-container " +
             footnoteSelector +
             ", figure {\
             -webkit-column-break-inside: avoid;\
@@ -556,13 +547,12 @@
         }
     }
 
-
     pagination.cutToFit = function(contents) {
 
         var range, overflow, manualPageBreak,
             ignoreLastLIcut = false,
             cutLIs, pageBreak,
-            // ContentHeight = height of page - height of top floats - height of footnotes.
+            // contentHeight = height of page - height of top floats - height of footnotes.
             contentHeight = (contents.parentElement.clientHeight -
                 contents.previousSibling.clientHeight - contents.nextSibling
                 .clientHeight),
@@ -596,9 +586,9 @@
         // Set height to contentHeight
         contents.style.height = contentHeight + "px";
         // We find that the first item is an OL/UL which may have started on the previous page.
-        if (range.startContainer.nodeName === 'OL' || range.startContainer
-            .nodeName === 'UL' || range.startContainer.nodeName ===
-            '#text' &&
+        if (['OL','UL'].indexOf(range.startContainer.nodeName) !== -1 || range.startContainer.nodeName ===
+            '#text' && range.startContainer.parentNode &&
+            ['OL','UL'].indexOf(range.startContainer.parentNode.nodeName) !== -1 &&
             range.startContainer.length === range.startOffset) {
             // We are cutting from inside a List, don't touch the innermost list items.
             ignoreLastLIcut = true;
@@ -606,7 +596,7 @@
         range.setEndAfter(contents.lastChild);
         overflow = range.extractContents();
         cutLIs = countOLItemsAndFixLI(contents);
-        if (cutLIs.length > 0 && ignoreLastLIcut) {
+        if (ignoreLastLIcut) {
             // Because the cut happened exactly between two LI items, don't try to unify the two lowest level LIs.
             cutLIs[cutLIs.length - 1].hideFirstLI = false;
             if (cutLIs[cutLIs.length - 1].start) {
@@ -762,8 +752,7 @@
 
 
         if (overflow.firstChild && overflow.firstChild.textContent.trim()
-            .length === 0 && (overflow.firstChild.nodeName === 'P' ||
-                overflow.firstChild.nodeName === 'DIV')) {
+            .length === 0 && ['P','DIV'].indexOf(overflow.firstChild.nodeName) !== -1) {
             overflow.removeChild(overflow.firstChild);
         }
 
