@@ -439,7 +439,6 @@ var ContentCutter = exports.ContentCutter = function () {
 
             // Set height temporarily to "auto" so the page flows beyond where
             // it should end and we can find the page break.
-            console.log([contents, contents.parentElement, contentHeight, contents.style.height, contentWidth, contents.style.columnCount]);
             contents.style.width = contentWidth * 2 + 10 + 'px';
             contents.style.columnWidth = contentWidth + 'px';
             contents.style.columnGap = '10px';
@@ -448,7 +447,6 @@ var ContentCutter = exports.ContentCutter = function () {
             boundingRect = contents.getBoundingClientRect();
             rightCutOff = boundingRect.left + contentWidth + 2;
 
-            console.log([boundingRect.left, contentWidth, rightCutOff]);
             manualPageBreak = contents.querySelector(this.config['pagebreakSelector']);
 
             if (manualPageBreak && manualPageBreak.getBoundingClientRect().left < rightCutOff) {
@@ -575,23 +573,19 @@ var ContentCutter = exports.ContentCutter = function () {
     }, {
         key: "findPageBreak",
         value: function findPageBreak(contents, rightCutOff) {
-            console.log(['findpagebreak', contents, rightCutOff]);
             var contentCoords = void 0,
                 found = void 0,
                 prevNode = void 0;
             if (contents.nodeType === 1) {
-                console.log(['element findbreak', contents, rightCutOff, contents.getBoundingClientRect(), contents.textContent]);
                 contentCoords = (0, _getBoundingClientRect.getBoundingClientRect)(contents);
                 if (contentCoords.left < rightCutOff) {
                     if (contentCoords.right > rightCutOff) {
-                        console.log('iterating children');
                         found = false;
                         var i = 0;
                         while (found === false && i < contents.childNodes.length) {
                             found = this.findPageBreak(contents.childNodes[i], rightCutOff);
                             i++;
                         }
-                        console.log(['done iterating children', found]);
                         if (found) {
                             return found;
                         }
@@ -610,7 +604,7 @@ var ContentCutter = exports.ContentCutter = function () {
                 range.setStart(contents, 0);
                 range.setEnd(contents, offset);
                 contentCoords = range.getBoundingClientRect();
-                console.log(['text coords', contentCoords, rightCutOff, contents.textContent]);
+
                 if (contentCoords.bottom === contentCoords.top) {
                     // A text node that doesn't have any output.
                     return false;
@@ -691,7 +685,7 @@ var DEFAULT_CONFIG_VALUES = exports.DEFAULT_CONFIG_VALUES = {
 };
 
 },{}],5:[function(require,module,exports){
-"use strict";
+'use strict';
 
 Object.defineProperty(exports, "__esModule", {
     value: true
@@ -701,10 +695,15 @@ exports.getBoundingClientRect = getBoundingClientRect;
 // This is a workaround that uses a range over the elements contents and combines all client rects around it.
 
 function getBoundingClientRect(element) {
-    var r = document.createRange();
-    r.setStart(element, 0);
-    r.setEnd(element, element.childNodes.length);
-    return r.getBoundingClientRect();
+
+    if (navigator.userAgent.toLowerCase().indexOf('firefox') > -1) {
+        return element.getBoundingClientRect();
+    } else {
+        var r = document.createRange();
+        r.setStart(element, 0);
+        r.setEnd(element, element.childNodes.length);
+        return r.getBoundingClientRect();
+    }
 }
 
 },{}],6:[function(require,module,exports){

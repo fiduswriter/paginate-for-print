@@ -2,8 +2,14 @@
 // This is a workaround that uses a range over the elements contents and combines all client rects around it.
 
 export function getBoundingClientRect(element) {
-    let r = document.createRange()
-    r.setStart(element, 0)
-    r.setEnd(element, element.childNodes.length)
-    return r.getBoundingClientRect()
+
+    if (navigator.userAgent.toLowerCase().indexOf('firefox') > -1) {
+        return element.getBoundingClientRect()
+    } else {
+        let r = document.createRange()
+        r.setStart(element, 0)
+        r.setEnd(element, element.childNodes.length)
+        return r.getBoundingClientRect()
+    }
+
 }

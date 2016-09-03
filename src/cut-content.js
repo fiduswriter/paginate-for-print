@@ -24,7 +24,6 @@ export class ContentCutter {
 
         // Set height temporarily to "auto" so the page flows beyond where
         // it should end and we can find the page break.
-        console.log([contents, contents.parentElement, contentHeight, contents.style.height, contentWidth, contents.style.columnCount])
         contents.style.width = (contentWidth * 2 + 10) + 'px'
         contents.style.columnWidth = contentWidth + 'px'
         contents.style.columnGap = '10px'
@@ -34,7 +33,6 @@ export class ContentCutter {
         rightCutOff = boundingRect.left + contentWidth + 2
 
 
-        console.log([boundingRect.left, contentWidth, rightCutOff])
         manualPageBreak = contents.querySelector(this.config[
             'pagebreakSelector'])
 
@@ -164,14 +162,11 @@ export class ContentCutter {
     // Go through a node (contents) and find the exact position where it goes
     // further to the right than the right cutoff.
     findPageBreak(contents, rightCutOff) {
-        console.log(['findpagebreak',contents, rightCutOff])
         let contentCoords, found, prevNode
         if (contents.nodeType === 1) {
-            console.log(['element findbreak',contents, rightCutOff, contents.getBoundingClientRect(), contents.textContent])
             contentCoords = getBoundingClientRect(contents)
             if (contentCoords.left < rightCutOff) {
                 if (contentCoords.right > rightCutOff) {
-                    console.log('iterating children')
                     found = false
                     let i = 0
                     while (found === false && i < contents.childNodes.length) {
@@ -179,7 +174,6 @@ export class ContentCutter {
                             i], rightCutOff)
                         i++
                     }
-                    console.log(['done iterating children', found])
                     if (found) {
                         return found
                     }
@@ -199,7 +193,7 @@ export class ContentCutter {
             range.setStart(contents, 0)
             range.setEnd(contents, offset)
             contentCoords = range.getBoundingClientRect()
-            console.log(['text coords',contentCoords, rightCutOff, contents.textContent])
+
             if (contentCoords.bottom === contentCoords.top) {
                 // A text node that doesn't have any output.
                 return false
