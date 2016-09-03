@@ -173,7 +173,6 @@ var LayoutApplier = exports.LayoutApplier = function () {
                     }
                     this.flowElement(flowObject.fragment, layoutDiv.firstChild, 'roman');
                 }
-                window.scrollTo(0, 0);
             }
         }
     }, {
@@ -333,10 +332,12 @@ var LayoutApplier = exports.LayoutApplier = function () {
             }
             if (container.classList.contains('pagination-body')) {
                 this.paginateDivision(layoutDiv, pageCounterStyle);
+                if (this.bodyFlowObjects.length === this.currentFragment && this.config['enableFrontmatter'] === false) {
+                    document.dispatchEvent(this.events.layoutFlowFinished);
+                }
             } else {
                 this.pageCounters[pageCounterStyle].numberPages();
                 document.dispatchEvent(this.events.layoutFlowFinished);
-                console.log('fibihshhs');
             }
         }
     }]);
