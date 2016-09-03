@@ -1,14 +1,15 @@
 <!DOCTYPE html>
 <html>
 <head>
+    <script src="../bundle/paginate-for-print.js"></script>
+    <script>
+    document.addEventListener("DOMContentLoaded", function(event) {
+        window.setTimeout(function() {
+            paginateForPrint();
+        }, 1000);
+    });
+    </script>
 
-<script>
-paginationConfig = {
-    frontmatterContents: '',
-    autoStart: true,
-}
-</script>
-    <script src="simplePagination.js"></script>
 </head>
 
 <body>

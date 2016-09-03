@@ -1,18 +1,21 @@
 <!DOCTYPE html>
 <html>
 <head>
-
-<script>
-paginationConfig = {
-    frontmatterContents: '<h1>Book title</h1>'
-        + '<h3>Book subtitle</h3><h5>'
-        + 'ed. Editor 1, Editor II, Editor III</h5><div class="pagination-pagebreak">'
-        + '</div><div id="copyrightpage">Copyright: You<br>License: CC</div>'
-        + '<div class="pagination-pagebreak"></div>',
-     autoStart: true,
-}
-</script>
-    <script src="simplePagination.js"></script>
+    <script src="../bundle/paginate-for-print.js"></script>
+    <script>
+    document.addEventListener("DOMContentLoaded", function(event) {
+        // Wait three seconds so that we are sure the images are loaded.
+        window.setTimeout(function() {
+            paginateForPrint({
+                frontmatterContents: '<h1>Book title</h1>'
+                    + '<h3>Book subtitle</h3><h5>'
+                    + 'ed. Editor 1, Editor II, Editor III</h5><div class="pagination-pagebreak">'
+                    + '</div><div id="copyrightpage">Copyright: You<br>License: CC</div>'
+                    + '<div class="pagination-pagebreak"></div>'
+            });
+        }, 3000);
+    });
+    </script>
 </head>
 
 <body>

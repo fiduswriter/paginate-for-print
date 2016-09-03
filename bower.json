@@ -1,0 +1,26 @@
+{
+  "name": "paginate-for-print",
+  "version": "0.0.1",
+  "homepage": "https://github.com/pagination-for-print",
+  "authors": [
+    "Johannes Wilm <mail@johanneswilm.org>"
+  ],
+  "description": "This project aims to create a simple alternative to cut up content into pages for printing and PDF generation in browsers.",
+  "main": "bundle/paginate-for-print.js",
+  "moduleType": [
+    "globals"
+  ],
+  "keywords": [
+    "pdf",
+    "print",
+    "pagination"
+  ],
+  "license": "LGPL",
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components",
+    "test",
+    "tests"
+  ]
+}

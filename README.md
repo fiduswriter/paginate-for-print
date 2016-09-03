@@ -1,6 +1,6 @@
-This project aims to create an alternative to pagination.js, without making use of CSS Regions.
+This project aims to create a simple alternative to cut up content into pages for printing and PDF generation in browsers.
 
-So far, two experiments with cutting up HTML to fit into individual pages can be tried out <a href="http://fiduswriter.github.io/simplePagination.js">here</a>.
+Check out the demo <a href="http://fiduswriter.github.io/paginate-for-print">here</a>.
 
 License:
-The project is licensed under the AGPL v.3 license.
+The project is licensed under the LGPL v.3 license.
