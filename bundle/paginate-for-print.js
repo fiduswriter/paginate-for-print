@@ -443,6 +443,7 @@ var ContentCutter = exports.ContentCutter = function () {
             contents.style.width = contentWidth * 2 + 10 + 'px';
             contents.style.columnWidth = contentWidth + 'px';
             contents.style.columnGap = '10px';
+            contents.style.columnFill = 'auto';
 
             boundingRect = contents.getBoundingClientRect();
             rightCutOff = boundingRect.left + contentWidth + 2;
