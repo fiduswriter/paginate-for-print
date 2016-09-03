@@ -173,14 +173,14 @@ export class LayoutApplier {
                     layoutDiv.firstChild)
                 layoutDiv.firstChild.classList.add(
                     'pagination-frontmatter')
-                let tempNode = document.createElement('div')
-                tempNode.innerHTML = this.config(
-                    'frontmatterContents')
                 let flowObject = {
                     fragment: document.createDocumentFragment()
                 }
-                while (tempNode.firstChild) {
-                    flowObject.fragment.appendChild(tempNode.firstChild)
+                if (this.config('frontmatterFlowFromElement')) {
+                    let fmNode = this.config('frontmatterFlowFromElement')
+                    while (fmNode.firstChild) {
+                        flowObject.fragment.appendChild(fmNode.firstChild)
+                    }
                 }
                 if (this.config('numberPages')) {
                     flowObject.fragment.appendChild(createToc())

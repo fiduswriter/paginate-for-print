@@ -3,15 +3,18 @@
 <head>
     <script src="../bundle/paginate-for-print.js"></script>
     <script>
+    var fmElement = document.createElement('div');
+    fmElement.innerHTML = '<h1>Book title</h1>'
+        + '<h3>Book subtitle</h3><h5>'
+        + 'ed. Editor 1, Editor II, Editor III</h5><div class="pagination-pagebreak">'
+        + '</div><div id="copyrightpage">Copyright: You<br>License: CC</div>'
+        + '<div class="pagination-pagebreak"></div>';
+
     document.addEventListener("DOMContentLoaded", function(event) {
         // Wait three seconds so that we are sure the images are loaded.
         window.setTimeout(function() {
             paginateForPrint({
-                frontmatterContents: '<h1>Book title</h1>'
-                    + '<h3>Book subtitle</h3><h5>'
-                    + 'ed. Editor 1, Editor II, Editor III</h5><div class="pagination-pagebreak">'
-                    + '</div><div id="copyrightpage">Copyright: You<br>License: CC</div>'
-                    + '<div class="pagination-pagebreak"></div>'
+                frontmatterFlowFromElement: fmElement
             });
         }, 3000);
     });

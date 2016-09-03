@@ -170,13 +170,14 @@ var LayoutApplier = exports.LayoutApplier = function () {
                 if (this.config('enableFrontmatter')) {
                     layoutDiv.insertBefore(document.createElement('div'), layoutDiv.firstChild);
                     layoutDiv.firstChild.classList.add('pagination-frontmatter');
-                    var tempNode = document.createElement('div');
-                    tempNode.innerHTML = this.config('frontmatterContents');
                     var flowObject = {
                         fragment: document.createDocumentFragment()
                     };
-                    while (tempNode.firstChild) {
-                        flowObject.fragment.appendChild(tempNode.firstChild);
+                    if (this.config('frontmatterFlowFromElement')) {
+                        var fmNode = this.config('frontmatterFlowFromElement');
+                        while (fmNode.firstChild) {
+                            flowObject.fragment.appendChild(fmNode.firstChild);
+                        }
                     }
                     if (this.config('numberPages')) {
                         flowObject.fragment.appendChild((0, _createToc.createToc)());
@@ -673,7 +674,7 @@ var DEFAULT_CONFIG_VALUES = exports.DEFAULT_CONFIG_VALUES = {
     //        'enableWordIndex': true,
     //        'bulkPagesToAdd': 50,
     //        'pagesToAddIncrementRatio': 1.4,
-    'frontmatterContents': '',
+    'frontmatterFlowFromElement': false, // An element that holds the contents to be flown into the frontmatter
     'numberPages': true,
     'footnoteSelector': '.pagination-footnote',
     'pagebreakSelector': '.pagination-pagebreak',
