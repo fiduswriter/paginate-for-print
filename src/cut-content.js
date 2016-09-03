@@ -1,3 +1,5 @@
+import {getBoundingClientRect} from "./get-bounding-client-rect"
+
 export class ContentCutter {
 
     constructor (config) {
@@ -14,35 +16,58 @@ export class ContentCutter {
             contentHeight = (contents.parentElement.clientHeight -
                 contents.previousSibling.clientHeight - contents.nextSibling
                 .clientHeight),
-            boundingRect, bottom
+            contentWidth = contents.parentElement.clientWidth,
+            boundingRect, rightCutOff
+
+        // set height to contentHeight
+        contents.style.height = contentHeight + "px"
+
+        if (navigator.userAgent.toLowerCase().indexOf('firefox') > -1) {
+            // Firefox has some insane bug which means that the new content height
+            // isn't applied immediately when dealing with multicol -- unless one
+            // removes the content and re-adds it.
+            let nSib = contents.nextSibling
+            let pEl = contents.parentElement
+            pEl.removeChild(contents)
+            pEl.insertBefore(contents,nSib)
+        }
 
         // Set height temporarily to "auto" so the page flows beyond where
-        // it should end and we can ginf the page break.
-        contents.style.height = "auto"
+        // it should end and we can find the page break.
+        contents.style.width = (contentWidth * 2 + 100) + 'px'
+        contents.style.columnWidth = contentWidth + 'px'
+        contents.style.columnGap = '100px'
+        contents.style.columnFill = 'auto'
+
+        contents.style.MozColumnWidth = contentWidth + 'px'
+        contents.style.MozColumnGap = '100px'
+        contents.style.MozColumnFill = 'auto'
+
         boundingRect = contents.getBoundingClientRect()
-        bottom = boundingRect.top + contentHeight
+        rightCutOff = boundingRect.left + contentWidth + 20
+
 
         manualPageBreak = contents.querySelector(this.config[
             'pagebreakSelector'])
 
-        if (manualPageBreak && manualPageBreak.getBoundingClientRect().top <
-            bottom) {
+        if (manualPageBreak && manualPageBreak.getBoundingClientRect().left <
+            rightCutOff) {
             range = document.createRange()
             range.setStartBefore(manualPageBreak)
-        } else if (boundingRect.bottom <= bottom) {
-            contents.style.height = contentHeight + "px"
+        } else if (boundingRect.right <= rightCutOff) {
+            contents.style.width = contentWidth + "px"
             return false
         } else {
-            pageBreak = this.findPageBreak(contents, bottom)
+            pageBreak = this.findPageBreak(contents, rightCutOff)
             if (!pageBreak) {
-                contents.style.height = contentHeight + "px"
+                contents.style.width = contentWidth + "px"
                 return false
             }
             range = document.createRange()
             range.setStart(pageBreak.node, pageBreak.offset)
         }
-        // Set height to contentHeight
-        contents.style.height = contentHeight + "px"
+
+        contents.style.width = contentWidth + "px"
         // We find that the first item is an OL/UL which may have started on the previous page.
         if (['OL','UL'].indexOf(range.startContainer.nodeName) !== -1 || range.startContainer.nodeName ===
             '#text' && range.startContainer.parentNode &&
@@ -148,18 +173,19 @@ export class ContentCutter {
         }
     }
 
-    // Go through a node (contents) and find the exact position where it goes lower than bottom.
-    findPageBreak(contents, bottom) {
+    // Go through a node (contents) and find the exact position where it goes
+    // further to the right than the right cutoff.
+    findPageBreak(contents, rightCutOff) {
         let contentCoords, found, prevNode
         if (contents.nodeType === 1) {
-            contentCoords = contents.getBoundingClientRect()
-            if (contentCoords.top < bottom) {
-                if (contentCoords.bottom > bottom) {
+            contentCoords = getBoundingClientRect(contents)
+            if (contentCoords.left < rightCutOff) {
+                if (contentCoords.right > rightCutOff) {
                     found = false
                     let i = 0
                     while (found === false && i < contents.childNodes.length) {
                         found = this.findPageBreak(contents.childNodes[
-                            i], bottom)
+                            i], rightCutOff)
                         i++
                     }
                     if (found) {
@@ -181,17 +207,18 @@ export class ContentCutter {
             range.setStart(contents, 0)
             range.setEnd(contents, offset)
             contentCoords = range.getBoundingClientRect()
+
             if (contentCoords.bottom === contentCoords.top) {
-                // Some text node that doesn't have any output.
+                // A text node that doesn't have any output.
                 return false
-            } else if (contentCoords.top < bottom) {
-                if (contentCoords.bottom > bottom) {
+            } else if (contentCoords.left < rightCutOff) {
+                if (contentCoords.right > rightCutOff) {
                     found = false
                     while (found === false && offset > 0) {
                         offset--
                         range.setEnd(contents, offset)
                         contentCoords = range.getBoundingClientRect()
-                        if (contentCoords.bottom <= bottom) {
+                        if (contentCoords.right <= rightCutOff) {
                             found = {
                                 node: contents,
                                 offset: offset
