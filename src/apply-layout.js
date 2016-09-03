@@ -51,7 +51,7 @@ export class LayoutApplier {
     initiate() {
         // Create div for layout
         let layoutDiv = document.createElement('div'),
-            flowedElement = eval(this.config('flowElement')),
+            flowedElement = this.config('flowFromElement') ? this.config('flowFromElement') : document.body,
             chapterStartSelector = this.config(
                 'chapterStartMarker'),
             sectionStartSelector = this.config(
@@ -60,7 +60,7 @@ export class LayoutApplier {
             dividers = flowedElement.querySelectorAll(dividerSelector),
             range = document.createRange(), nextChapter = false,
             nextSection = false,
-            flowTo = eval(this.config('flowTo'))
+            flowTo = this.config('flowToElement') ? this.config('flowToElement') : document.body
 
         layoutDiv.id = 'pagination-layout'
         for (let i = 0; i < dividers.length; i++) {

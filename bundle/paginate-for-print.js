@@ -65,7 +65,7 @@ var LayoutApplier = exports.LayoutApplier = function () {
         value: function initiate() {
             // Create div for layout
             var layoutDiv = document.createElement('div'),
-                flowedElement = eval(this.config('flowElement')),
+                flowedElement = this.config('flowFromElement') ? this.config('flowFromElement') : document.body,
                 chapterStartSelector = this.config('chapterStartMarker'),
                 sectionStartSelector = this.config('sectionStartMarker'),
                 dividerSelector = chapterStartSelector + ',' + sectionStartSelector,
@@ -73,7 +73,7 @@ var LayoutApplier = exports.LayoutApplier = function () {
                 range = document.createRange(),
                 nextChapter = false,
                 nextSection = false,
-                flowTo = eval(this.config('flowTo'));
+                flowTo = this.config('flowToElement') ? this.config('flowToElement') : document.body;
 
             layoutDiv.id = 'pagination-layout';
             for (var i = 0; i < dividers.length; i++) {
@@ -662,8 +662,8 @@ var DEFAULT_CONFIG_VALUES = exports.DEFAULT_CONFIG_VALUES = {
     'sectionTitleMarker': 'h1',
     'chapterStartMarker': 'h2',
     'chapterTitleMarker': 'h2',
-    'flowElement': 'document.body',
-    'flowTo': 'document.body',
+    'flowFromElement': false, // An element where to flow from (if false, document.body will be taken)
+    'flowToElement': false, // An element where to flow to (if false, document.body will be taken)
     'alwaysEven': true,
     'enableFrontmatter': true,
     //        'enableTableOfFigures': false,

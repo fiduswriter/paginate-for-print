@@ -3,8 +3,8 @@ export const DEFAULT_CONFIG_VALUES = {
     'sectionTitleMarker': 'h1',
     'chapterStartMarker': 'h2',
     'chapterTitleMarker': 'h2',
-    'flowElement': 'document.body',
-    'flowTo': 'document.body',
+    'flowFromElement': false, // An element where to flow from (if false, document.body will be taken)
+    'flowToElement': false, // An element where to flow to (if false, document.body will be taken)
     'alwaysEven': true,
     'enableFrontmatter': true,
     //        'enableTableOfFigures': false,
