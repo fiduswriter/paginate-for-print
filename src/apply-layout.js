@@ -349,7 +349,6 @@ export class LayoutApplier {
         if (container.classList.contains('pagination-body')) {
             this.paginateDivision(layoutDiv, pageCounterStyle)
         } else {
-            window.scrollTo(0, 0)
             this.pageCounters[pageCounterStyle].numberPages()
             document.dispatchEvent(this.events.layoutFlowFinished)
         }
