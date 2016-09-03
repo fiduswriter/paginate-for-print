@@ -344,7 +344,7 @@ var LayoutApplier = exports.LayoutApplier = function () {
     return LayoutApplier;
 }();
 
-},{"./create-toc":2,"./cut-content":3,"./matches-selector":6,"./page-counters":7}],2:[function(require,module,exports){
+},{"./create-toc":2,"./cut-content":3,"./matches-selector":7,"./page-counters":8}],2:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -393,14 +393,17 @@ function createToc() {
     return tocDiv;
 }
 
-},{"./matches-selector":6}],3:[function(require,module,exports){
+},{"./matches-selector":7}],3:[function(require,module,exports){
 "use strict";
 
 Object.defineProperty(exports, "__esModule", {
     value: true
 });
+exports.ContentCutter = undefined;
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+var _getBoundingClientRect = require("./get-bounding-client-rect");
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
@@ -427,34 +430,43 @@ var ContentCutter = exports.ContentCutter = function () {
 
             // contentHeight = height of page - height of top floats - height of footnotes.
             contentHeight = contents.parentElement.clientHeight - contents.previousSibling.clientHeight - contents.nextSibling.clientHeight,
+                contentWidth = contents.parentElement.clientWidth,
                 boundingRect = void 0,
-                bottom = void 0;
+                rightCutOff = void 0;
+
+            // Set height to contentHeight
+            contents.style.height = contentHeight + "px";
 
             // Set height temporarily to "auto" so the page flows beyond where
-            // it should end and we can ginf the page break.
-            contents.style.height = "auto";
-            boundingRect = contents.getBoundingClientRect();
-            bottom = boundingRect.top + contentHeight;
+            // it should end and we can find the page break.
+            console.log([contents, contents.parentElement, contentHeight, contents.style.height, contentWidth, contents.style.columnCount]);
+            contents.style.width = contentWidth * 2 + 10 + 'px';
+            contents.style.columnWidth = contentWidth + 'px';
+            contents.style.columnGap = '10px';
 
+            boundingRect = contents.getBoundingClientRect();
+            rightCutOff = boundingRect.left + contentWidth + 2;
+
+            console.log([boundingRect.left, contentWidth, rightCutOff]);
             manualPageBreak = contents.querySelector(this.config['pagebreakSelector']);
 
-            if (manualPageBreak && manualPageBreak.getBoundingClientRect().top < bottom) {
+            if (manualPageBreak && manualPageBreak.getBoundingClientRect().left < rightCutOff) {
                 range = document.createRange();
                 range.setStartBefore(manualPageBreak);
-            } else if (boundingRect.bottom <= bottom) {
-                contents.style.height = contentHeight + "px";
+            } else if (boundingRect.right <= rightCutOff) {
+                contents.style.width = contentWidth + "px";
                 return false;
             } else {
-                pageBreak = this.findPageBreak(contents, bottom);
+                pageBreak = this.findPageBreak(contents, rightCutOff);
                 if (!pageBreak) {
-                    contents.style.height = contentHeight + "px";
+                    contents.style.width = contentWidth + "px";
                     return false;
                 }
                 range = document.createRange();
                 range.setStart(pageBreak.node, pageBreak.offset);
             }
-            // Set height to contentHeight
-            contents.style.height = contentHeight + "px";
+
+            contents.style.width = contentWidth + "px";
             // We find that the first item is an OL/UL which may have started on the previous page.
             if (['OL', 'UL'].indexOf(range.startContainer.nodeName) !== -1 || range.startContainer.nodeName === '#text' && range.startContainer.parentNode && ['OL', 'UL'].indexOf(range.startContainer.parentNode.nodeName) !== -1 && range.startContainer.length === range.startOffset) {
                 // We are cutting from inside a List, don't touch the innermost list items.
@@ -556,24 +568,29 @@ var ContentCutter = exports.ContentCutter = function () {
             }
         }
 
-        // Go through a node (contents) and find the exact position where it goes lower than bottom.
+        // Go through a node (contents) and find the exact position where it goes
+        // further to the right than the right cutoff.
 
     }, {
         key: "findPageBreak",
-        value: function findPageBreak(contents, bottom) {
+        value: function findPageBreak(contents, rightCutOff) {
+            console.log(['findpagebreak', contents, rightCutOff]);
             var contentCoords = void 0,
                 found = void 0,
                 prevNode = void 0;
             if (contents.nodeType === 1) {
-                contentCoords = contents.getBoundingClientRect();
-                if (contentCoords.top < bottom) {
-                    if (contentCoords.bottom > bottom) {
+                console.log(['element findbreak', contents, rightCutOff, contents.getBoundingClientRect(), contents.textContent]);
+                contentCoords = (0, _getBoundingClientRect.getBoundingClientRect)(contents);
+                if (contentCoords.left < rightCutOff) {
+                    if (contentCoords.right > rightCutOff) {
+                        console.log('iterating children');
                         found = false;
                         var i = 0;
                         while (found === false && i < contents.childNodes.length) {
-                            found = this.findPageBreak(contents.childNodes[i], bottom);
+                            found = this.findPageBreak(contents.childNodes[i], rightCutOff);
                             i++;
                         }
+                        console.log(['done iterating children', found]);
                         if (found) {
                             return found;
                         }
@@ -592,17 +609,18 @@ var ContentCutter = exports.ContentCutter = function () {
                 range.setStart(contents, 0);
                 range.setEnd(contents, offset);
                 contentCoords = range.getBoundingClientRect();
+                console.log(['text coords', contentCoords, rightCutOff, contents.textContent]);
                 if (contentCoords.bottom === contentCoords.top) {
-                    // Some text node that doesn't have any output.
+                    // A text node that doesn't have any output.
                     return false;
-                } else if (contentCoords.top < bottom) {
-                    if (contentCoords.bottom > bottom) {
+                } else if (contentCoords.left < rightCutOff) {
+                    if (contentCoords.right > rightCutOff) {
                         found = false;
                         while (found === false && offset > 0) {
                             offset--;
                             range.setEnd(contents, offset);
                             contentCoords = range.getBoundingClientRect();
-                            if (contentCoords.bottom <= bottom) {
+                            if (contentCoords.right <= rightCutOff) {
                                 found = {
                                     node: contents,
                                     offset: offset
@@ -630,7 +648,7 @@ var ContentCutter = exports.ContentCutter = function () {
     return ContentCutter;
 }();
 
-},{}],4:[function(require,module,exports){
+},{"./get-bounding-client-rect":5}],4:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -674,6 +692,23 @@ var DEFAULT_CONFIG_VALUES = exports.DEFAULT_CONFIG_VALUES = {
 },{}],5:[function(require,module,exports){
 "use strict";
 
+Object.defineProperty(exports, "__esModule", {
+    value: true
+});
+exports.getBoundingClientRect = getBoundingClientRect;
+// Chrome (+ possibly others) currently has issues when trying to find the real coordinates of elements when in multicol.
+// This is a workaround that uses a range over the elements contents and combines all client rects around it.
+
+function getBoundingClientRect(element) {
+    var r = document.createRange();
+    r.setStart(element, 0);
+    r.setEnd(element, element.childNodes.length);
+    return r.getBoundingClientRect();
+}
+
+},{}],6:[function(require,module,exports){
+"use strict";
+
 var _paginateForPrint = require("./paginate-for-print");
 
 module.exports = function (configValues) {
@@ -681,7 +716,7 @@ module.exports = function (configValues) {
     paginator.initiate();
 };
 
-},{"./paginate-for-print":8}],6:[function(require,module,exports){
+},{"./paginate-for-print":9}],7:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -699,7 +734,7 @@ function matchesSelector(element, selector) {
     }
 }
 
-},{}],7:[function(require,module,exports){
+},{}],8:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -794,7 +829,7 @@ var PageCounterRoman = exports.PageCounterRoman = function (_PageCounterArab) {
     return PageCounterRoman;
 }(PageCounterArab);
 
-},{}],8:[function(require,module,exports){
+},{}],9:[function(require,module,exports){
 "use strict";
 
 Object.defineProperty(exports, "__esModule", {
@@ -885,5 +920,5 @@ var PaginateForPrint = exports.PaginateForPrint = function () {
     return PaginateForPrint;
 }();
 
-},{"./apply-layout":1,"./defaults":4}]},{},[5])(5)
+},{"./apply-layout":1,"./defaults":4}]},{},[6])(6)
 });
