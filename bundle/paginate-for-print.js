@@ -434,8 +434,18 @@ var ContentCutter = exports.ContentCutter = function () {
                 boundingRect = void 0,
                 rightCutOff = void 0;
 
-            // Set height to contentHeight
+            // set height to contentHeight
             contents.style.height = contentHeight + "px";
+
+            if (navigator.userAgent.toLowerCase().indexOf('firefox') > -1) {
+                // Firefox has some insane bug which means that the new content height
+                // isn't applied immediately when dealing with multicol -- unless one
+                // removes the content and re-adds it.
+                var nSib = contents.nextSibling;
+                var pEl = contents.parentElement;
+                pEl.removeChild(contents);
+                pEl.insertBefore(contents, nSib);
+            }
 
             // Set height temporarily to "auto" so the page flows beyond where
             // it should end and we can find the page break.
