@@ -439,13 +439,17 @@ var ContentCutter = exports.ContentCutter = function () {
 
             // Set height temporarily to "auto" so the page flows beyond where
             // it should end and we can find the page break.
-            contents.style.width = contentWidth * 2 + 10 + 'px';
+            contents.style.width = contentWidth * 2 + 100 + 'px';
             contents.style.columnWidth = contentWidth + 'px';
-            contents.style.columnGap = '10px';
+            contents.style.columnGap = '100px';
             contents.style.columnFill = 'auto';
 
+            contents.style.MozColumnWidth = contentWidth + 'px';
+            contents.style.MozColumnGap = '100px';
+            contents.style.MozColumnFill = 'auto';
+
             boundingRect = contents.getBoundingClientRect();
-            rightCutOff = boundingRect.left + contentWidth + 2;
+            rightCutOff = boundingRect.left + contentWidth + 20;
 
             manualPageBreak = contents.querySelector(this.config['pagebreakSelector']);
 
@@ -685,7 +689,7 @@ var DEFAULT_CONFIG_VALUES = exports.DEFAULT_CONFIG_VALUES = {
 };
 
 },{}],5:[function(require,module,exports){
-'use strict';
+"use strict";
 
 Object.defineProperty(exports, "__esModule", {
     value: true
@@ -695,15 +699,10 @@ exports.getBoundingClientRect = getBoundingClientRect;
 // This is a workaround that uses a range over the elements contents and combines all client rects around it.
 
 function getBoundingClientRect(element) {
-
-    if (navigator.userAgent.toLowerCase().indexOf('firefox') > -1) {
-        return element.getBoundingClientRect();
-    } else {
-        var r = document.createRange();
-        r.setStart(element, 0);
-        r.setEnd(element, element.childNodes.length);
-        return r.getBoundingClientRect();
-    }
+    var r = document.createRange();
+    r.setStart(element, 0);
+    r.setEnd(element, element.childNodes.length);
+    return r.getBoundingClientRect();
 }
 
 },{}],6:[function(require,module,exports){
