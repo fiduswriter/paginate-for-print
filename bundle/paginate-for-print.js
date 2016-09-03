@@ -19,10 +19,10 @@ var _createToc = require("./create-toc");
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
 var LayoutApplier = exports.LayoutApplier = function () {
-    function LayoutApplier(configValues) {
+    function LayoutApplier(config) {
         _classCallCheck(this, LayoutApplier);
 
-        this.configValues = configValues;
+        this.config = config;
         this.bodyFlowObjects = [];
         //this.currentChapter = false
         //this.currentSection = false
@@ -46,34 +46,23 @@ var LayoutApplier = exports.LayoutApplier = function () {
             roman: new _pageCounters.PageCounterRoman()
         };
 
-        this.cutter = new _cutContent.ContentCutter(configValues);
+        this.cutter = new _cutContent.ContentCutter(this.config);
     }
 
     _createClass(LayoutApplier, [{
-        key: "config",
-        value: function config(configKey) {
-            /* Return configuration variables or false.
-             */
-            if (this.configValues.hasOwnProperty(configKey)) {
-                return this.configValues[configKey];
-            } else {
-                return false;
-            }
-        }
-    }, {
         key: "initiate",
         value: function initiate() {
             // Create div for layout
             var layoutDiv = document.createElement('div'),
-                flowedElement = this.config('flowFromElement') ? this.config('flowFromElement') : document.body,
-                chapterStartSelector = this.config('chapterStartMarker'),
-                sectionStartSelector = this.config('sectionStartMarker'),
+                flowedElement = this.config['flowFromElement'] ? this.config['flowFromElement'] : document.body,
+                chapterStartSelector = this.config['chapterStartMarker'],
+                sectionStartSelector = this.config['sectionStartMarker'],
                 dividerSelector = chapterStartSelector + ',' + sectionStartSelector,
                 dividers = flowedElement.querySelectorAll(dividerSelector),
                 range = document.createRange(),
                 nextChapter = false,
                 nextSection = false,
-                flowTo = this.config('flowToElement') ? this.config('flowToElement') : document.body;
+                flowTo = this.config['flowToElement'] ? this.config['flowToElement'] : document.body;
 
             layoutDiv.id = 'pagination-layout';
             for (var i = 0; i < dividers.length; i++) {
@@ -99,7 +88,7 @@ var LayoutApplier = exports.LayoutApplier = function () {
                     extraElement.parentElement.removeChild(extraElement);
                 }
                 if ((0, _matchesSelector.matchesSelector)(dividers[i], chapterStartSelector)) {
-                    var tempNode = flowedElement.querySelector(this.config('chapterTitleMarker'));
+                    var tempNode = flowedElement.querySelector(this.config['chapterTitleMarker']);
                     if (!tempNode) {
                         tempNode = document.createElement('div');
                     }
@@ -109,7 +98,7 @@ var LayoutApplier = exports.LayoutApplier = function () {
                         nextChapter.appendChild(tempNode.firstChild);
                     }
                 } else {
-                    var _tempNode = flowedElement.querySelector(this.config('sectionTitleMarker')).cloneNode(true);
+                    var _tempNode = flowedElement.querySelector(this.config['sectionTitleMarker']).cloneNode(true);
                     nextSection = document.createDocumentFragment();
                     while (_tempNode.firstChild) {
                         nextSection.appendChild(_tempNode.firstChild);
@@ -167,19 +156,19 @@ var LayoutApplier = exports.LayoutApplier = function () {
                 this.currentChapter = false;
                 this.currentSection = false;
                 this.pageCounters[pageCounterStyle].numberPages();
-                if (this.config('enableFrontmatter')) {
+                if (this.config['enableFrontmatter']) {
                     layoutDiv.insertBefore(document.createElement('div'), layoutDiv.firstChild);
                     layoutDiv.firstChild.classList.add('pagination-frontmatter');
                     var flowObject = {
                         fragment: document.createDocumentFragment()
                     };
-                    if (this.config('frontmatterFlowFromElement')) {
-                        var fmNode = this.config('frontmatterFlowFromElement');
+                    if (this.config['frontmatterFlowFromElement']) {
+                        var fmNode = this.config['frontmatterFlowFromElement'];
                         while (fmNode.firstChild) {
                             flowObject.fragment.appendChild(fmNode.firstChild);
                         }
                     }
-                    if (this.config('numberPages')) {
+                    if (this.config['numberPages']) {
                         flowObject.fragment.appendChild((0, _createToc.createToc)());
                     }
                     this.flowElement(flowObject.fragment, layoutDiv.firstChild, 'roman');
@@ -193,8 +182,8 @@ var LayoutApplier = exports.LayoutApplier = function () {
 
             var lastPage = this.createPage(container, pageCounterStyle),
                 clonedNode = node.cloneNode(true),
-                footnoteSelector = this.config('footnoteSelector'),
-                topfloatSelector = this.config('topfloatSelector'),
+                footnoteSelector = this.config['footnoteSelector'],
+                topfloatSelector = this.config['topfloatSelector'],
                 that = this;
 
             lastPage.appendChild(node);
@@ -315,7 +304,7 @@ var LayoutApplier = exports.LayoutApplier = function () {
 
             page.appendChild(mainContentsContainer);
 
-            if (this.config('numberPages')) {
+            if (this.config['numberPages']) {
 
                 var pagenumberField = document.createElement('div');
                 pagenumberField.classList.add('pagination-pagenumber');
@@ -339,7 +328,7 @@ var LayoutApplier = exports.LayoutApplier = function () {
         key: "finish",
         value: function finish(container, pageCounterStyle) {
             var layoutDiv = container.parentElement;
-            if (this.config('alwaysEven') && container.querySelectorAll('.pagination-page').length % 2 === 1) {
+            if (this.config['alwaysEven'] && container.querySelectorAll('.pagination-page').length % 2 === 1) {
                 this.createPage(container, pageCounterStyle);
             }
             if (container.classList.contains('pagination-body')) {
@@ -416,27 +405,16 @@ var _createClass = function () { function defineProperties(target, props) { for 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
 
 var ContentCutter = exports.ContentCutter = function () {
-    function ContentCutter(configValues) {
+    function ContentCutter(config) {
         _classCallCheck(this, ContentCutter);
 
-        this.configValues = configValues;
+        this.config = config;
     }
 
+    // main cut method
+
+
     _createClass(ContentCutter, [{
-        key: "config",
-        value: function config(configKey) {
-            /* Return configuration variables or false.
-             */
-            if (this.configValues.hasOwnProperty(configKey)) {
-                return this.configValues[configKey];
-            } else {
-                return false;
-            }
-        }
-
-        // main cut method
-
-    }, {
         key: "cutToFit",
         value: function cutToFit(contents) {
 
@@ -458,7 +436,7 @@ var ContentCutter = exports.ContentCutter = function () {
             boundingRect = contents.getBoundingClientRect();
             bottom = boundingRect.top + contentHeight;
 
-            manualPageBreak = contents.querySelector(this.config('pagebreakSelector'));
+            manualPageBreak = contents.querySelector(this.config['pagebreakSelector']);
 
             if (manualPageBreak && manualPageBreak.getBoundingClientRect().top < bottom) {
                 range = document.createRange();
@@ -672,8 +650,6 @@ var DEFAULT_CONFIG_VALUES = exports.DEFAULT_CONFIG_VALUES = {
     //        'enableMarginNotes': false,
     //        'enableCrossReferences': true,
     //        'enableWordIndex': true,
-    //        'bulkPagesToAdd': 50,
-    //        'pagesToAddIncrementRatio': 1.4,
     'frontmatterFlowFromElement': false, // An element that holds the contents to be flown into the frontmatter
     'numberPages': true,
     'footnoteSelector': '.pagination-footnote',
@@ -681,7 +657,6 @@ var DEFAULT_CONFIG_VALUES = exports.DEFAULT_CONFIG_VALUES = {
     'topfloatSelector': '.pagination-topfloat',
     //        'marginnoteSelector': '.pagination-marginnote',
     //        'maxPageNumber': 10000,
-    //        'columnSeparatorWidth': 0.09,
     'outerMargin': 0.5,
     'innerMargin': 0.8,
     'contentsTopMargin': 0.8,
@@ -842,12 +817,12 @@ function _classCallCheck(instance, Constructor) { if (!(instance instanceof Cons
  */
 
 var PaginateForPrint = exports.PaginateForPrint = function () {
-    function PaginateForPrint(configValues) {
+    function PaginateForPrint(config) {
         _classCallCheck(this, PaginateForPrint);
 
-        this.configValues = Object.assign(_defaults.DEFAULT_CONFIG_VALUES, configValues);
+        this.config = Object.assign(_defaults.DEFAULT_CONFIG_VALUES, config);
         this.pageStyleSheet = document.createElement('style');
-        this.layoutApplier = new _applyLayout.LayoutApplier(this.configValues);
+        this.layoutApplier = new _applyLayout.LayoutApplier(this.config);
     }
 
     _createClass(PaginateForPrint, [{
@@ -879,7 +854,7 @@ var PaginateForPrint = exports.PaginateForPrint = function () {
              * to the head of the DOM.
              */
             var stylesheet = document.createElement('style');
-            var footnoteSelector = this.config('footnoteSelector');
+            var footnoteSelector = this.config['footnoteSelector'];
 
             stylesheet.innerHTML = "\n.pagination-footnotes " + footnoteSelector + " {display: block;}\n.pagination-contents " + footnoteSelector + " > * {display:none;}\n.pagination-main-contents-container " + footnoteSelector + ", figure {\n    -webkit-column-break-inside: avoid;\n    page-break-inside: avoid;\n}\nbody {\n    counter-reset: pagination-footnote pagination-footnote-reference;\n}\n.pagination-contents " + footnoteSelector + "::before {\n    counter-increment: pagination-footnote-reference;\n    content: counter(pagination-footnote-reference);\n}\n" + footnoteSelector + " > * > *:first-child::before {\n    counter-increment: pagination-footnote;\n    content: counter(pagination-footnote);\n}\n.pagination-page {\n    position: relative;\n}\n.pagination-page {\n    page-break-after: always;\n    page-break-before: always;\n    margin-left: auto;\n    margin-right: auto;\n}\n.pagination-page:first-child {\n    page-break-before: avoid;\n}\n.pagination-page:last-child {\n    page-break-after: avoid;\n}\n.pagination-main-contents-container, .pagination-pagenumber, .pagination-header {\n    position: absolute;\n}\nli.hide {\n    list-style-type: none;\n}\n        ";
             document.head.appendChild(stylesheet);
@@ -888,33 +863,22 @@ var PaginateForPrint = exports.PaginateForPrint = function () {
         key: "setPageStyle",
         value: function setPageStyle() {
             // Set style for a particular page size.
-            var unit = this.config('lengthUnit'),
-                contentsWidthNumber = this.config('pageWidth') - this.config('innerMargin') - this.config('outerMargin'),
+            var unit = this.config['lengthUnit'],
+                contentsWidthNumber = this.config['pageWidth'] - this.config['innerMargin'] - this.config['outerMargin'],
                 contentsWidth = contentsWidthNumber + unit,
-                contentsHeightNumber = this.config('pageHeight') - this.config('contentsTopMargin') - this.config('contentsBottomMargin'),
+                contentsHeightNumber = this.config['pageHeight'] - this.config['contentsTopMargin'] - this.config['contentsBottomMargin'],
                 contentsHeight = contentsHeightNumber + unit,
-                pageWidth = this.config('pageWidth') + unit,
-                pageHeight = this.config('pageHeight') + unit,
-                contentsBottomMargin = this.config('contentsBottomMargin') + unit,
-                innerMargin = this.config('innerMargin') + unit,
-                outerMargin = this.config('outerMargin') + unit,
-                pagenumberBottomMargin = this.config('pagenumberBottomMargin') + unit,
-                headerTopMargin = this.config('headerTopMargin') + unit,
+                pageWidth = this.config['pageWidth'] + unit,
+                pageHeight = this.config['pageHeight'] + unit,
+                contentsBottomMargin = this.config['contentsBottomMargin'] + unit,
+                innerMargin = this.config['innerMargin'] + unit,
+                outerMargin = this.config['outerMargin'] + unit,
+                pagenumberBottomMargin = this.config['pagenumberBottomMargin'] + unit,
+                headerTopMargin = this.config['headerTopMargin'] + unit,
                 imageMaxHeight = contentsHeightNumber - 0.1 + unit,
-                footnoteSelector = this.config('footnoteSelector');
+                footnoteSelector = this.config['footnoteSelector'];
 
             this.pageStyleSheet.innerHTML = "\n.pagination-page {height: " + pageHeight + "; width: " + pageWidth + ";background-color: #fff;}\n@page {size:" + pageWidth + " " + pageHeight + ";}\nbody {background-color: #efefef; margin:0;}\n@media screen{.pagination-page {border:solid 1px #000; margin-bottom:.2in;}}\n.pagination-main-contents-container {\n    width: " + contentsWidth + ";\n    height: " + contentsHeight + ";\n    bottom: " + contentsBottomMargin + ";\n}\n.pagination-contents-container {\n    bottom: " + contentsBottomMargin + ";\n    height: " + contentsHeight + ";\n}\n.pagination-contents {\n    height: " + contentsHeight + ";\n    width: " + contentsWidth + ";\n}\nimg {max-height: " + imageMaxHeight + "; max-width: 100%;}\n.pagination-pagenumber {\n    bottom: " + pagenumberBottomMargin + ";\n}\n.pagination-header {\n    top: " + headerTopMargin + ";\n}\n.pagination-page:nth-child(odd) .pagination-main-contents-container,\n.pagination-page:nth-child(odd) .pagination-pagenumber,\n.pagination-page:nth-child(odd) .pagination-header {\n    right: " + outerMargin + ";\n    left: " + innerMargin + ";\n}\n.pagination-page:nth-child(even) .pagination-main-contents-container,\n.pagination-page:nth-child(even) .pagination-pagenumber,\n.pagination-page:nth-child(even) .pagination-header {\n    right: " + innerMargin + ";\n    left: " + outerMargin + ";\n}\n.pagination-page:nth-child(odd) .pagination-pagenumber,\n.pagination-page:nth-child(odd) .pagination-header {text-align:right;}\n.pagination-page:nth-child(odd) .pagination-header-section {display:none;}\n.pagination-page:nth-child(even) .pagination-header-chapter {display:none;}\n.pagination-page:nth-child(even) .pagination-pagenumber,\n.pagination-page:nth-child(even) .pagination-header { text-align:left;}\n" + footnoteSelector + " > * > * {font-size: 0.7em; margin:.25em;}\n" + footnoteSelector + " > * > *::before, " + footnoteSelector + "::before {\n    position: relative;\n    top: -0.5em;\n    font-size: 80%;\n}\n#pagination-toc-title:before {\n    content:'Contents';\n}\n.pagination-toc-entry .pagination-toc-pagenumber {float:right;}\n            ";
-        }
-    }, {
-        key: "config",
-        value: function config(configKey) {
-            /* Return configuration variables or false.
-             */
-            if (this.configValues.hasOwnProperty(configKey)) {
-                return this.configValues[configKey];
-            } else {
-                return false;
-            }
         }
     }]);
 

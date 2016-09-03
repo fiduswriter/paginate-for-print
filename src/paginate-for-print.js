@@ -9,10 +9,10 @@ import {LayoutApplier} from "./apply-layout"
 
 export class PaginateForPrint {
 
-    constructor(configValues) {
-        this.configValues = Object.assign(DEFAULT_CONFIG_VALUES, configValues)
+    constructor(config) {
+        this.config = Object.assign(DEFAULT_CONFIG_VALUES, config)
         this.pageStyleSheet = document.createElement('style')
-        this.layoutApplier = new LayoutApplier(this.configValues)
+        this.layoutApplier = new LayoutApplier(this.config)
     }
 
     initiate() {
@@ -42,7 +42,7 @@ export class PaginateForPrint {
          * to the head of the DOM.
          */
         let stylesheet = document.createElement('style')
-        let footnoteSelector = this.config('footnoteSelector')
+        let footnoteSelector = this.config['footnoteSelector']
 
         stylesheet.innerHTML = `
 .pagination-footnotes ${footnoteSelector} {display: block;}
@@ -89,30 +89,27 @@ li.hide {
 
     setPageStyle() {
         // Set style for a particular page size.
-        let unit = this.config('lengthUnit'),
-            contentsWidthNumber = this.config('pageWidth') -
-            this.config(
-                'innerMargin') - this.config('outerMargin'),
+        let unit = this.config['lengthUnit'],
+            contentsWidthNumber = this.config['pageWidth'] -
+            this.config['innerMargin'] - this.config['outerMargin'],
             contentsWidth = contentsWidthNumber + unit,
-            contentsHeightNumber = this.config('pageHeight') -
-            this
-            .config('contentsTopMargin') - this.config(
-                'contentsBottomMargin'),
+            contentsHeightNumber = this.config['pageHeight'] -
+            this.config['contentsTopMargin'] -
+            this.config['contentsBottomMargin'],
             contentsHeight = contentsHeightNumber + unit,
-            pageWidth = this.config('pageWidth') + unit,
-            pageHeight = this.config('pageHeight') + unit,
-            contentsBottomMargin = this.config(
-                'contentsBottomMargin') +
+            pageWidth = this.config['pageWidth'] + unit,
+            pageHeight = this.config['pageHeight'] + unit,
+            contentsBottomMargin = this.config['contentsBottomMargin'] +
             unit,
-            innerMargin = this.config('innerMargin') + unit,
-            outerMargin = this.config('outerMargin') + unit,
-            pagenumberBottomMargin = this.config(
-                'pagenumberBottomMargin') +
+            innerMargin = this.config['innerMargin'] + unit,
+            outerMargin = this.config['outerMargin'] + unit,
+            pagenumberBottomMargin = this.config
+                ['pagenumberBottomMargin'] +
             unit,
-            headerTopMargin = this.config('headerTopMargin') +
+            headerTopMargin = this.config['headerTopMargin'] +
             unit,
             imageMaxHeight = contentsHeightNumber - 0.1 + unit,
-            footnoteSelector = this.config('footnoteSelector')
+            footnoteSelector = this.config['footnoteSelector']
 
         this.pageStyleSheet.innerHTML = `
 .pagination-page {height: ${pageHeight}; width: ${pageWidth};background-color: #fff;}
@@ -169,16 +166,6 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
 .pagination-toc-entry .pagination-toc-pagenumber {float:right;}
             `
 
-    }
-
-    config(configKey) {
-        /* Return configuration variables or false.
-         */
-        if (this.configValues.hasOwnProperty(configKey)) {
-            return this.configValues[configKey]
-        } else {
-            return false
-        }
     }
 
 }

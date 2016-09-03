@@ -5,8 +5,8 @@ import {createToc} from "./create-toc"
 
 export class LayoutApplier {
 
-    constructor(configValues) {
-        this.configValues = configValues
+    constructor(config) {
+        this.config = config
         this.bodyFlowObjects = []
         //this.currentChapter = false
         //this.currentSection = false
@@ -33,34 +33,21 @@ export class LayoutApplier {
             roman: new PageCounterRoman()
         }
 
-        this.cutter = new ContentCutter(configValues)
+        this.cutter = new ContentCutter(this.config)
 
     }
-
-    config(configKey) {
-        /* Return configuration variables or false.
-         */
-        if (this.configValues.hasOwnProperty(configKey)) {
-            return this.configValues[configKey]
-        } else {
-            return false
-        }
-    }
-
 
     initiate() {
         // Create div for layout
         let layoutDiv = document.createElement('div'),
-            flowedElement = this.config('flowFromElement') ? this.config('flowFromElement') : document.body,
-            chapterStartSelector = this.config(
-                'chapterStartMarker'),
-            sectionStartSelector = this.config(
-                'sectionStartMarker'),
+            flowedElement = this.config['flowFromElement'] ? this.config['flowFromElement'] : document.body,
+            chapterStartSelector = this.config['chapterStartMarker'],
+            sectionStartSelector = this.config['sectionStartMarker'],
             dividerSelector = chapterStartSelector + ',' + sectionStartSelector,
             dividers = flowedElement.querySelectorAll(dividerSelector),
             range = document.createRange(), nextChapter = false,
             nextSection = false,
-            flowTo = this.config('flowToElement') ? this.config('flowToElement') : document.body
+            flowTo = this.config['flowToElement'] ? this.config['flowToElement'] : document.body
 
         layoutDiv.id = 'pagination-layout'
         for (let i = 0; i < dividers.length; i++) {
@@ -88,8 +75,7 @@ export class LayoutApplier {
             }
             if (matchesSelector(dividers[i],
                     chapterStartSelector)) {
-                let tempNode = flowedElement.querySelector(this.config(
-                    'chapterTitleMarker'))
+                let tempNode = flowedElement.querySelector(this.config['chapterTitleMarker'])
                 if (!tempNode) {
                     tempNode = document.createElement('div')
                 }
@@ -99,8 +85,7 @@ export class LayoutApplier {
                     nextChapter.appendChild(tempNode.firstChild)
                 }
             } else {
-                let tempNode = flowedElement.querySelector(this.config(
-                    'sectionTitleMarker')).cloneNode(true)
+                let tempNode = flowedElement.querySelector(this.config['sectionTitleMarker']).cloneNode(true)
                 nextSection = document.createDocumentFragment()
                 while (tempNode.firstChild) {
                     nextSection.appendChild(tempNode.firstChild)
@@ -168,7 +153,7 @@ export class LayoutApplier {
             this.currentChapter = false
             this.currentSection = false
             this.pageCounters[pageCounterStyle].numberPages()
-            if (this.config('enableFrontmatter')) {
+            if (this.config['enableFrontmatter']) {
                 layoutDiv.insertBefore(document.createElement('div'),
                     layoutDiv.firstChild)
                 layoutDiv.firstChild.classList.add(
@@ -176,13 +161,13 @@ export class LayoutApplier {
                 let flowObject = {
                     fragment: document.createDocumentFragment()
                 }
-                if (this.config('frontmatterFlowFromElement')) {
-                    let fmNode = this.config('frontmatterFlowFromElement')
+                if (this.config['frontmatterFlowFromElement']) {
+                    let fmNode = this.config['frontmatterFlowFromElement']
                     while (fmNode.firstChild) {
                         flowObject.fragment.appendChild(fmNode.firstChild)
                     }
                 }
-                if (this.config('numberPages')) {
+                if (this.config['numberPages']) {
                     flowObject.fragment.appendChild(createToc())
                 }
                 this.flowElement(flowObject.fragment, layoutDiv.firstChild,
@@ -197,8 +182,8 @@ export class LayoutApplier {
 
         let lastPage = this.createPage(container, pageCounterStyle),
             clonedNode = node.cloneNode(true),
-            footnoteSelector = this.config('footnoteSelector'),
-            topfloatSelector = this.config('topfloatSelector'),
+            footnoteSelector = this.config['footnoteSelector'],
+            topfloatSelector = this.config['topfloatSelector'],
             that = this
 
         lastPage.appendChild(node)
@@ -333,7 +318,7 @@ export class LayoutApplier {
 
         page.appendChild(mainContentsContainer)
 
-        if (this.config('numberPages')) {
+        if (this.config['numberPages']) {
 
             let pagenumberField = document.createElement('div')
             pagenumberField.classList.add('pagination-pagenumber')
@@ -357,7 +342,7 @@ export class LayoutApplier {
 
     finish(container, pageCounterStyle) {
         let layoutDiv = container.parentElement
-        if (this.config('alwaysEven') && container.querySelectorAll(
+        if (this.config['alwaysEven'] && container.querySelectorAll(
                 '.pagination-page').length % 2 === 1) {
             this.createPage(container, pageCounterStyle)
         }

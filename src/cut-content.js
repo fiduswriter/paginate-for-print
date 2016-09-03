@@ -1,17 +1,7 @@
 export class ContentCutter {
 
-    constructor (configValues) {
-        this.configValues = configValues
-    }
-
-    config(configKey) {
-        /* Return configuration variables or false.
-         */
-        if (this.configValues.hasOwnProperty(configKey)) {
-            return this.configValues[configKey]
-        } else {
-            return false
-        }
+    constructor (config) {
+        this.config = config
     }
 
     // main cut method
@@ -32,8 +22,8 @@ export class ContentCutter {
         boundingRect = contents.getBoundingClientRect()
         bottom = boundingRect.top + contentHeight
 
-        manualPageBreak = contents.querySelector(this.config(
-            'pagebreakSelector'))
+        manualPageBreak = contents.querySelector(this.config[
+            'pagebreakSelector'])
 
         if (manualPageBreak && manualPageBreak.getBoundingClientRect().top <
             bottom) {
