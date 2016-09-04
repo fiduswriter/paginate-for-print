@@ -29,8 +29,8 @@ export class LayoutApplier {
         // Create div for layout
         let layoutDiv = document.createElement('div'),
             flowedElement = this.config['flowFromElement'] ? this.config['flowFromElement'] : document.body,
-            chapterStartSelector = this.config['chapterStartMarker'],
-            sectionStartSelector = this.config['sectionStartMarker'],
+            chapterStartSelector = this.config['chapterStartSelector'],
+            sectionStartSelector = this.config['sectionStartSelector'],
             dividerSelector = chapterStartSelector + ',' + sectionStartSelector,
             dividers = flowedElement.querySelectorAll(dividerSelector),
             range = document.createRange(), nextChapter = false,
@@ -63,7 +63,7 @@ export class LayoutApplier {
             }
             if (matchesSelector(dividers[i],
                     chapterStartSelector)) {
-                let tempNode = flowedElement.querySelector(this.config['chapterTitleMarker'])
+                let tempNode = flowedElement.querySelector(this.config['chapterTitleSelector'])
                 if (!tempNode) {
                     tempNode = document.createElement('div')
                 }
@@ -73,7 +73,7 @@ export class LayoutApplier {
                     nextChapter.appendChild(tempNode.firstChild)
                 }
             } else {
-                let tempNode = flowedElement.querySelector(this.config['sectionTitleMarker']).cloneNode(true)
+                let tempNode = flowedElement.querySelector(this.config['sectionTitleSelector']).cloneNode(true)
                 nextSection = document.createDocumentFragment()
                 while (tempNode.firstChild) {
                     nextSection.appendChild(tempNode.firstChild)

@@ -14,7 +14,7 @@
     document.addEventListener("DOMContentLoaded", function(event) {
         // Wait three seconds so that we are sure the images are loaded.
         window.setTimeout(function() {
-            paginateForPrint({
+            window.paginateTearDown = paginateForPrint({
                 frontmatterFlowFromElement: fmElement
             });
         }, 3000);
