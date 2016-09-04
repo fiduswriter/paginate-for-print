@@ -5,8 +5,8 @@
     <script src="../bundle/paginate-for-print.js"></script>
     <script>
     document.addEventListener("DOMContentLoaded", function(event) {
-        window.paginateTearDown = window.setTimeout(function() {
-            paginateForPrint();
+        window.setTimeout(function() {
+            window.paginateTearDown = paginateForPrint();
         }, 1000);
     });
     </script>
