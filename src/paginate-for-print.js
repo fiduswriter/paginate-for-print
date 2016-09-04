@@ -11,7 +11,7 @@ export class PaginateForPrint {
 
     constructor(config) {
         this.config = Object.assign(DEFAULT_CONFIG_VALUES, config)
-        this.pageStyleSheet = document.createElement('style')
+        this.stylesheets = []
         this.layoutApplier = new LayoutApplier(this.config)
     }
 
@@ -21,9 +21,6 @@ export class PaginateForPrint {
          */
         this.setStyle()
         this.setPageStyle()
-        document.head.insertBefore(
-            this.pageStyleSheet,
-            document.head.firstChild)
         this.setBrowserSpecifics()
         this.layoutApplier.initiate()
     }
@@ -34,6 +31,7 @@ export class PaginateForPrint {
             // Small fix for Firefox to not print first two pages on top of oneanother.
             stylesheet.innerHTML = ".pagination-page:first-child {page-break-before: always;}"
             document.head.appendChild(stylesheet)
+            this.stylesheets.push(stylesheet)
         }
     }
 
@@ -85,6 +83,7 @@ li.hide {
 }
         `
         document.head.appendChild(stylesheet)
+        this.stylesheets.push(stylesheet)
     }
 
     setPageStyle() {
@@ -110,8 +109,8 @@ li.hide {
             unit,
             imageMaxHeight = contentsHeightNumber - 0.1 + unit,
             footnoteSelector = this.config['footnoteSelector']
-
-        this.pageStyleSheet.innerHTML = `
+            let pageStyleSheet = document.createElement('style')
+            pageStyleSheet.innerHTML = `
 .pagination-page {height: ${pageHeight}; width: ${pageWidth};background-color: #fff;}
 @page {size:${pageWidth} ${pageHeight};}
 body {background-color: #efefef; margin:0;}
@@ -165,7 +164,20 @@ ${footnoteSelector} > * > *::before, ${footnoteSelector}::before {
 }
 .pagination-toc-entry .pagination-toc-pagenumber {float:right;}
             `
+        document.head.insertBefore(pageStyleSheet,document.head.firstChild)
+        this.stylesheets.push(pageStyleSheet)
+    }
 
+    // Remove stylesheets and all contents of the flow to element.
+    tearDown() {
+        // Remove stylesheets from DOM
+        this.stylesheets.forEach(function(stylesheet){
+            stylesheet.parentNode.removeChild(stylesheet)
+        })
+        let flowToElement = this.config['flowToElement'] ? this.config['flowToElement'] : document.body
+        while (flowToElement.firstChild) {
+            flowToElement.removeChild(flowToElement.firstChild)
+        }
     }
 
 }

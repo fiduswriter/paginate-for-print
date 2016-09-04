@@ -52,7 +52,7 @@ export class PageCounterRoman extends PageCounterArab {
 
     show() {
         // Create roman numeral representations of numbers.
-        let digits = String(+this.value).split(""),
+        let digits = String(+this.counterValue).split(""),
             key = ["", "C", "CC", "CCC", "CD", "D", "DC", "DCC", "DCCC",
                 "CM",
                 "",

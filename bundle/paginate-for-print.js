@@ -825,7 +825,7 @@ var PageCounterRoman = exports.PageCounterRoman = function (_PageCounterArab) {
         key: 'show',
         value: function show() {
             // Create roman numeral representations of numbers.
-            var digits = String(+this.value).split(""),
+            var digits = String(+this.counterValue).split(""),
                 key = ["", "C", "CC", "CCC", "CD", "D", "DC", "DCC", "DCCC", "CM", "", "X", "XX", "XXX", "XL", "L", "LX", "LXX", "LXXX", "XC", "", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX"],
                 roman = "",
                 i = 3;
@@ -866,7 +866,7 @@ var PaginateForPrint = exports.PaginateForPrint = function () {
         _classCallCheck(this, PaginateForPrint);
 
         this.config = Object.assign(_defaults.DEFAULT_CONFIG_VALUES, config);
-        this.pageStyleSheet = document.createElement('style');
+        this.stylesheets = [];
         this.layoutApplier = new _applyLayout.LayoutApplier(this.config);
     }
 
@@ -878,7 +878,6 @@ var PaginateForPrint = exports.PaginateForPrint = function () {
              */
             this.setStyle();
             this.setPageStyle();
-            document.head.insertBefore(this.pageStyleSheet, document.head.firstChild);
             this.setBrowserSpecifics();
             this.layoutApplier.initiate();
         }
@@ -890,6 +889,7 @@ var PaginateForPrint = exports.PaginateForPrint = function () {
                 // Small fix for Firefox to not print first two pages on top of oneanother.
                 stylesheet.innerHTML = ".pagination-page:first-child {page-break-before: always;}";
                 document.head.appendChild(stylesheet);
+                this.stylesheets.push(stylesheet);
             }
         }
     }, {
@@ -903,6 +903,7 @@ var PaginateForPrint = exports.PaginateForPrint = function () {
 
             stylesheet.innerHTML = "\n.pagination-footnotes " + footnoteSelector + " {display: block;}\n.pagination-contents " + footnoteSelector + " > * {display:none;}\n.pagination-main-contents-container " + footnoteSelector + ", figure {\n    -webkit-column-break-inside: avoid;\n    page-break-inside: avoid;\n}\nbody {\n    counter-reset: pagination-footnote pagination-footnote-reference;\n}\n.pagination-contents " + footnoteSelector + "::before {\n    counter-increment: pagination-footnote-reference;\n    content: counter(pagination-footnote-reference);\n}\n" + footnoteSelector + " > * > *:first-child::before {\n    counter-increment: pagination-footnote;\n    content: counter(pagination-footnote);\n}\n.pagination-page {\n    position: relative;\n}\n.pagination-page {\n    page-break-after: always;\n    page-break-before: always;\n    margin-left: auto;\n    margin-right: auto;\n}\n.pagination-page:first-child {\n    page-break-before: avoid;\n}\n.pagination-page:last-child {\n    page-break-after: avoid;\n}\n.pagination-main-contents-container, .pagination-pagenumber, .pagination-header {\n    position: absolute;\n}\nli.hide {\n    list-style-type: none;\n}\n        ";
             document.head.appendChild(stylesheet);
+            this.stylesheets.push(stylesheet);
         }
     }, {
         key: "setPageStyle",
@@ -922,8 +923,25 @@ var PaginateForPrint = exports.PaginateForPrint = function () {
                 headerTopMargin = this.config['headerTopMargin'] + unit,
                 imageMaxHeight = contentsHeightNumber - 0.1 + unit,
                 footnoteSelector = this.config['footnoteSelector'];
+            var pageStyleSheet = document.createElement('style');
+            pageStyleSheet.innerHTML = "\n.pagination-page {height: " + pageHeight + "; width: " + pageWidth + ";background-color: #fff;}\n@page {size:" + pageWidth + " " + pageHeight + ";}\nbody {background-color: #efefef; margin:0;}\n@media screen{.pagination-page {border:solid 1px #000; margin-bottom:.2in;}}\n.pagination-main-contents-container {\n    width: " + contentsWidth + ";\n    height: " + contentsHeight + ";\n    bottom: " + contentsBottomMargin + ";\n}\n.pagination-contents-container {\n    bottom: " + contentsBottomMargin + ";\n    height: " + contentsHeight + ";\n}\n.pagination-contents {\n    height: " + contentsHeight + ";\n    width: " + contentsWidth + ";\n}\nimg {max-height: " + imageMaxHeight + "; max-width: 100%;}\n.pagination-pagenumber {\n    bottom: " + pagenumberBottomMargin + ";\n}\n.pagination-header {\n    top: " + headerTopMargin + ";\n}\n.pagination-page:nth-child(odd) .pagination-main-contents-container,\n.pagination-page:nth-child(odd) .pagination-pagenumber,\n.pagination-page:nth-child(odd) .pagination-header {\n    right: " + outerMargin + ";\n    left: " + innerMargin + ";\n}\n.pagination-page:nth-child(even) .pagination-main-contents-container,\n.pagination-page:nth-child(even) .pagination-pagenumber,\n.pagination-page:nth-child(even) .pagination-header {\n    right: " + innerMargin + ";\n    left: " + outerMargin + ";\n}\n.pagination-page:nth-child(odd) .pagination-pagenumber,\n.pagination-page:nth-child(odd) .pagination-header {text-align:right;}\n.pagination-page:nth-child(odd) .pagination-header-section {display:none;}\n.pagination-page:nth-child(even) .pagination-header-chapter {display:none;}\n.pagination-page:nth-child(even) .pagination-pagenumber,\n.pagination-page:nth-child(even) .pagination-header { text-align:left;}\n" + footnoteSelector + " > * > * {font-size: 0.7em; margin:.25em;}\n" + footnoteSelector + " > * > *::before, " + footnoteSelector + "::before {\n    position: relative;\n    top: -0.5em;\n    font-size: 80%;\n}\n#pagination-toc-title:before {\n    content:'Contents';\n}\n.pagination-toc-entry .pagination-toc-pagenumber {float:right;}\n            ";
+            document.head.insertBefore(pageStyleSheet, document.head.firstChild);
+            this.stylesheets.push(pageStyleSheet);
+        }
 
-            this.pageStyleSheet.innerHTML = "\n.pagination-page {height: " + pageHeight + "; width: " + pageWidth + ";background-color: #fff;}\n@page {size:" + pageWidth + " " + pageHeight + ";}\nbody {background-color: #efefef; margin:0;}\n@media screen{.pagination-page {border:solid 1px #000; margin-bottom:.2in;}}\n.pagination-main-contents-container {\n    width: " + contentsWidth + ";\n    height: " + contentsHeight + ";\n    bottom: " + contentsBottomMargin + ";\n}\n.pagination-contents-container {\n    bottom: " + contentsBottomMargin + ";\n    height: " + contentsHeight + ";\n}\n.pagination-contents {\n    height: " + contentsHeight + ";\n    width: " + contentsWidth + ";\n}\nimg {max-height: " + imageMaxHeight + "; max-width: 100%;}\n.pagination-pagenumber {\n    bottom: " + pagenumberBottomMargin + ";\n}\n.pagination-header {\n    top: " + headerTopMargin + ";\n}\n.pagination-page:nth-child(odd) .pagination-main-contents-container,\n.pagination-page:nth-child(odd) .pagination-pagenumber,\n.pagination-page:nth-child(odd) .pagination-header {\n    right: " + outerMargin + ";\n    left: " + innerMargin + ";\n}\n.pagination-page:nth-child(even) .pagination-main-contents-container,\n.pagination-page:nth-child(even) .pagination-pagenumber,\n.pagination-page:nth-child(even) .pagination-header {\n    right: " + innerMargin + ";\n    left: " + outerMargin + ";\n}\n.pagination-page:nth-child(odd) .pagination-pagenumber,\n.pagination-page:nth-child(odd) .pagination-header {text-align:right;}\n.pagination-page:nth-child(odd) .pagination-header-section {display:none;}\n.pagination-page:nth-child(even) .pagination-header-chapter {display:none;}\n.pagination-page:nth-child(even) .pagination-pagenumber,\n.pagination-page:nth-child(even) .pagination-header { text-align:left;}\n" + footnoteSelector + " > * > * {font-size: 0.7em; margin:.25em;}\n" + footnoteSelector + " > * > *::before, " + footnoteSelector + "::before {\n    position: relative;\n    top: -0.5em;\n    font-size: 80%;\n}\n#pagination-toc-title:before {\n    content:'Contents';\n}\n.pagination-toc-entry .pagination-toc-pagenumber {float:right;}\n            ";
+        // Remove stylesheets and all contents of the flow to element.
+
+    }, {
+        key: "tearDown",
+        value: function tearDown() {
+            // Remove stylesheets from DOM
+            this.stylesheets.forEach(function (stylesheet) {
+                stylesheet.parentNode.removeChild(stylesheet);
+            });
+            var flowToElement = this.config['flowToElement'] ? this.config['flowToElement'] : document.body;
+            while (flowToElement.firstChild) {
+                flowToElement.removeChild(flowToElement.firstChild);
+            }
         }
     }]);
 
