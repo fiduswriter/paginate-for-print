@@ -12,18 +12,6 @@ export class LayoutApplier {
         //this.currentSection = false
         this.currentFragment = -1
 
-        this.events = {
-            /* layoutFlowFinished is emitted the first time the flow of the entire book has
-             * been created.
-             */
-            layoutFlowFinished: document.createEvent('Event')
-        }
-
-        this.events.layoutFlowFinished.initEvent(
-            'layoutFlowFinished',
-            true,
-            true)
-
         /* pageCounters contains all the page counters we use in a book --
          * typically these are two -- roman for the frontmatter and arab for the main
          * body contents.
@@ -347,13 +335,12 @@ export class LayoutApplier {
         }
         if (container.classList.contains('pagination-body')) {
             this.paginateDivision(layoutDiv, pageCounterStyle)
-            if (this.bodyFlowObjects.length===this.currentFragment &&
-             this.config['enableFrontmatter']===false) {
-                document.dispatchEvent(this.events.layoutFlowFinished)
+            if (this.bodyFlowObjects.length===this.currentFragment && this.config['enableFrontmatter']===false) {
+                this.config['callback']()
             }
         } else {
             this.pageCounters[pageCounterStyle].numberPages()
-            document.dispatchEvent(this.events.layoutFlowFinished)
+            this.config['callback']()
         }
     }
 

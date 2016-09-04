@@ -30,5 +30,6 @@ export const DEFAULT_CONFIG_VALUES = {
     //        'marginNotesWidth': 1.5,
     //        'marginNotesSeparatorWidth': 0.09,
     //        'marginNotesVerticalSeparatorWidth': 0.09,
-    'lengthUnit': 'in'
+    'lengthUnit': 'in',
+    'callback': function() {}
 }

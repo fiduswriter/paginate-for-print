@@ -333,11 +333,11 @@ var LayoutApplier = exports.LayoutApplier = function () {
             if (container.classList.contains('pagination-body')) {
                 this.paginateDivision(layoutDiv, pageCounterStyle);
                 if (this.bodyFlowObjects.length === this.currentFragment && this.config['enableFrontmatter'] === false) {
-                    document.dispatchEvent(this.events.layoutFlowFinished);
+                    this.config['callback']();
                 }
             } else {
                 this.pageCounters[pageCounterStyle].numberPages();
-                document.dispatchEvent(this.events.layoutFlowFinished);
+                this.config['callback']();
             }
         }
     }]);
@@ -696,7 +696,8 @@ var DEFAULT_CONFIG_VALUES = exports.DEFAULT_CONFIG_VALUES = {
     //        'marginNotesWidth': 1.5,
     //        'marginNotesSeparatorWidth': 0.09,
     //        'marginNotesVerticalSeparatorWidth': 0.09,
-    'lengthUnit': 'in'
+    'lengthUnit': 'in',
+    'callback': function callback() {}
 };
 
 },{}],5:[function(require,module,exports){
