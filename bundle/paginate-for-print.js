@@ -186,9 +186,7 @@ var LayoutApplier = exports.LayoutApplier = function () {
                 var topfloats = clonedNode.querySelectorAll(topfloatSelector);
 
                 for (var i = 0; i < topfloatsLength; i++) {
-                    while (topfloats[i].firstChild) {
-                        lastPage.previousSibling.appendChild(topfloats[i].firstChild);
-                    }
+                    lastPage.previousSibling.appendChild(topfloats[i]);
                 }
                 while (lastPage.firstChild) {
                     lastPage.removeChild(lastPage.firstChild);
