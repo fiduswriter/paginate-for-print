@@ -183,10 +183,7 @@ export class LayoutApplier {
             let topfloats = clonedNode.querySelectorAll(topfloatSelector)
 
             for (let i = 0; i < topfloatsLength; i++) {
-                while (topfloats[i].firstChild) {
-                    lastPage.previousSibling.appendChild(topfloats[i].firstChild)
-                }
-
+                lastPage.previousSibling.appendChild(topfloats[i])
             }
             while (lastPage.firstChild) {
                 lastPage.removeChild(lastPage.firstChild)
