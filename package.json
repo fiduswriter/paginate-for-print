@@ -3,6 +3,7 @@
   "version": "0.0.7",
   "author": "Johannes Wilm",
   "license": "LGPL",
+  "main": "dist/index.js",
   "devDependencies": {
     "blint": "^0.5.0",
     "babel-cli": "^6.4.0",
