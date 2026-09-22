@@ -1,6 +1,6 @@
 {
     "name": "paged-with-floats",
-    "version": "0.10.0",
+    "version": "0.11.0",
     "packageManager": "pnpm@10.29.3",
     "description": "Applies CSS for paged media",
     "author": "Johannes Wilm",
@@ -38,11 +38,11 @@
         "Patrick Kranz",
         "Rob Mayer",
         "Sam Ruby",
-        "St\u00e9phane Elbaron",
+        "Stéphane Elbaron",
         "Talbi Youssef",
         "Urban Suppiger",
         "Yann Trividic",
-        "Antoine Fauchi\u00e9",
+        "Antoine Fauchié",
         "mb21",
         "wangfengming",
         "wenbei421"
