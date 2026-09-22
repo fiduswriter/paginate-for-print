@@ -30,8 +30,8 @@ importers:
         specifier: ^2.0.4
         version: 2.0.4
       pages-to-pdf:
-        specifier: ^0.3.4
-        version: 0.3.4
+        specifier: ^0.3.10
+        version: 0.3.10
       svg4pdf-lib:
         specifier: ^0.1.2
         version: 0.1.2(@pdfme/pdf-lib@6.1.12)
@@ -2856,8 +2856,8 @@ packages:
     resolution: {integrity: sha512-gFL35q7kbE/zBaPA3UKhp2vSzcPYx2ecbYuwv1ucE9Il6IIgBDweBlH8D68UFGZic2MkllKa2KHCfC1IQBQUYA==}
     engines: {node: '>=12'}
 
-  pages-to-pdf@0.3.4:
-    resolution: {integrity: sha512-RgnMrg6NKhwqolTfMtgBqMW7RCqzl9QhLtaM8MeJsolj8VnQoJC1n5lEGGIeBGylCbyH2CpjBOll2eLCqsFP6g==}
+  pages-to-pdf@0.3.10:
+    resolution: {integrity: sha512-k/WF0d7AyOWHM5v8V6qWEjYmWdZbe9sL6TYoWoGlTz7wVEje6nMaGV1qKzu2+wTYfjNugTtIdCyXAnF/nt85Vw==}
 
   pako@0.2.9:
     resolution: {integrity: sha512-NUcwaKxUxWrZLpDG+z/xZaCgQITkA/Dv4V/T6bw7VON6l1Xz/VnrBqrYjZQ12TamKHzITTfOEIYUj48y2KXImA==}
@@ -6925,7 +6925,7 @@ snapshots:
 
   package-name-regex@2.0.6: {}
 
-  pages-to-pdf@0.3.4:
+  pages-to-pdf@0.3.10:
     dependencies:
       '@mathjax/src': 4.1.3
       '@pdfme/pdf-lib': 6.1.12

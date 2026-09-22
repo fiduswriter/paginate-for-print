@@ -36,6 +36,13 @@ export {
 	type PrintHTMLConfig,
 } from "./print.js";
 
+export { pagedWithFloatsEngine } from "./engine.js";
+export type {
+	PaginateConfig,
+	PaginatedWindow,
+	PrintEngine,
+} from "./engine.js";
+
 /**
  * Options for {@link renderHTML}: pagination configuration for a visible
  * preview.
@@ -101,6 +108,8 @@ export interface HtmlToPDFOptions {
 	attachments?: import("pages-to-pdf").EmitAttachment[];
 	/** Print-level extras passed through to the emitter. */
 	printOptions?: EmitOptions["printOptions"];
+	/** Optional status callback for emission progress. */
+	onProgress?: (message: string) => void;
 }
 
 /**
@@ -125,6 +134,7 @@ export async function htmlToPDF(
 		woff2WasmUrl: options.woff2WasmUrl,
 		attachments: options.attachments,
 		printOptions: options.printOptions,
+		onProgress: options.onProgress,
 		backend: PAGED_WITH_FLOATS_BACKEND,
 	};
 
@@ -143,7 +153,7 @@ export async function htmlToPDF(
 	});
 	try {
 		const win = iframe.contentWindow!;
-		return await emitPdfFromWindow(win, undefined, emitOptions);
+		return await emitPdfFromWindow(win, emitOptions);
 	} finally {
 		// Give microtasks spawned by emission a tick to unwind before the
 		// window they measured against disappears.

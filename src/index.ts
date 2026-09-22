@@ -17,3 +17,10 @@ export {
 	registerHandlers,
 	initializeHandlers
 };
+
+export { pagedWithFloatsEngine } from "./engine.js";
+export type {
+	PaginateConfig,
+	PaginatedWindow,
+	PrintEngine
+} from "./engine.js";

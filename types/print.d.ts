@@ -16,7 +16,7 @@
  * Instead of vivliostyle's layout engine, the given document is paginated
  * by paged-with-floats inside a hidden same-origin iframe that loads this library's
  * polyfill bundle. When pagination has finished, `printCallback` receives
- * the iframe window (for e.g. emitPdfFromPagedWindow); without a
+ * the iframe window (for e.g. htmlToPDF); without a
  * callback the iframe prints directly and is removed.
  */
 export interface PrintHTMLConfig {
@@ -25,7 +25,7 @@ export interface PrintHTMLConfig {
     /**
      * Called with the iframe window once pagination has completed. Call
      * `iframeWin.print()` (or hand the window to
-     * `emitPdfFromPagedWindow`) as needed. When omitted, printing
+     * `htmlToPDF`) as needed. When omitted, printing
      * happens automatically.
      */
     printCallback?: (win: Window) => void;
@@ -42,7 +42,7 @@ export interface PrintHTMLConfig {
     /**
      * Keep the iframe in the document after pagination finishes. Set this
      * when the printCallback hands the window to an async consumer such
-     * as emitPdfFromPagedWindow; remove it yourself afterwards.
+     * as htmlToPDF; remove it yourself afterwards.
      */
     keepIframe?: boolean;
     /**

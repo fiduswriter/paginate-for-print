@@ -25,6 +25,8 @@
  */
 import { type EmitMetadata, type EmitOptions } from "pages-to-pdf";
 export { printHTML, type PrintHTMLConfig, } from "./print.js";
+export { pagedWithFloatsEngine } from "./engine.js";
+export type { PaginateConfig, PaginatedWindow, PrintEngine, } from "./engine.js";
 /**
  * Options for {@link renderHTML}: pagination configuration for a visible
  * preview.
@@ -73,6 +75,8 @@ export interface HtmlToPDFOptions {
     attachments?: import("pages-to-pdf").EmitAttachment[];
     /** Print-level extras passed through to the emitter. */
     printOptions?: EmitOptions["printOptions"];
+    /** Optional status callback for emission progress. */
+    onProgress?: (message: string) => void;
 }
 /**
  * Paginates `html` with paged-with-floats and returns real vector PDF bytes —
