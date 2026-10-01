@@ -72,7 +72,6 @@
         }
     },
     "dependencies": {
-        "@babel/polyfill": "^7.10.1",
         "@babel/runtime": "^7.21.0",
         "@chenglou/pretext": "^0.0.8",
         "clear-cut": "^2.0.2",
