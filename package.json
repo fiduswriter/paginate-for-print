@@ -1,6 +1,6 @@
 {
     "name": "paged-with-floats",
-    "version": "0.11.0",
+    "version": "0.11.1",
     "packageManager": "pnpm@10.29.3",
     "description": "Applies CSS for paged media",
     "author": "Johannes Wilm",
