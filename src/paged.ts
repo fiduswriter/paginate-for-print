@@ -25,7 +25,7 @@
  */
 import {
 	emitPdfFromWindow,
-	PAGED_WITH_FLOATS_BACKEND,
+	PAGINATE_FOR_PRINT_BACKEND,
 	type EmitMetadata,
 	type EmitOptions,
 } from "pages-to-pdf";
@@ -135,7 +135,7 @@ export async function htmlToPDF(
 		attachments: options.attachments,
 		printOptions: options.printOptions,
 		onProgress: options.onProgress,
-		backend: PAGED_WITH_FLOATS_BACKEND,
+		backend: PAGINATE_FOR_PRINT_BACKEND,
 	};
 
 	const iframe: HTMLIFrameElement = await printHTML(html, {

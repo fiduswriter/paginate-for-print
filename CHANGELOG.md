@@ -1,4 +1,11 @@
-# Changelog
+## 1.1.0 (2026-10-03)
+
+### Changed
+
+- `pages-to-pdf` updated to ^0.4.1, whose paged backend preset is renamed
+  `PAGED_WITH_FLOATS_BACKEND` → `PAGINATE_FOR_PRINT_BACKEND`; this package's
+  print pipeline now uses the new name throughout. No public API of this
+  package changed.
 
 ## 1.0.0 (2026-10-03)
 

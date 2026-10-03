@@ -1,6 +1,6 @@
 import type { BackendConfig } from "pages-to-pdf";
 
-import { PAGED_WITH_FLOATS_BACKEND } from "pages-to-pdf";
+import { PAGINATE_FOR_PRINT_BACKEND } from "pages-to-pdf";
 import { printHTML } from "./print.js";
 
 /**
@@ -140,5 +140,5 @@ export const paginateForPrintEngine: PrintEngine = {
 	name: "paginate-for-print",
 	preparePagination,
 	print,
-	backend: PAGED_WITH_FLOATS_BACKEND,
+	backend: PAGINATE_FOR_PRINT_BACKEND,
 };
