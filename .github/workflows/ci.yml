@@ -55,7 +55,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build docker image
-        run: docker build -t paged-with-floats .
+        run: docker build -t paginate-for-print .
 
       - name: Run render specs
-        run: docker run --rm --ipc=host paged-with-floats npm run specs
+        run: docker run --rm --ipc=host paginate-for-print npm run specs

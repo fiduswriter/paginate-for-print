@@ -123,8 +123,8 @@
         "watch": "rollup -w -c",
         "lint": "eslint -c .eslintrc.json src specs",
         "specs-dom": "jest --config=specs/jest.config.js page-floats data64 filters/undisplayed filters/script-elements splits/tables/long-table whitespaces/whitespaces.spec.js",
-        "docker-specs": "docker build -t paged-with-floats . && docker run --rm --ipc=host -v $(pwd)/specs:/home/pwuser/paged-with-floats/specs paged-with-floats npm run specs",
-        "docker-update-specs": "docker build -t paged-with-floats . && docker run --rm --ipc=host -v $(pwd)/specs:/home/pwuser/paged-with-floats/specs paged-with-floats npm run specs -- -u"
+        "docker-specs": "docker build -t paginate-for-print . && docker run --rm --ipc=host -v $(pwd)/specs:/home/pwuser/paginate-for-print/specs paginate-for-print npm run specs",
+        "docker-update-specs": "docker build -t paginate-for-print . && docker run --rm --ipc=host -v $(pwd)/specs:/home/pwuser/paginate-for-print/specs paginate-for-print npm run specs -- -u"
     },
     "repository": {
         "type": "git",

@@ -3,7 +3,7 @@ FROM mcr.microsoft.com/playwright:v1.62.1-noble
 # Application parameters and variables
 ENV NODE_ENV=development
 ENV PORT=9090
-ENV DIRECTORY /home/pwuser/paged-with-floats
+ENV DIRECTORY /home/pwuser/paginate-for-print
 
 # Configuration for Chrome
 ENV CONNECTION_TIMEOUT=60000
