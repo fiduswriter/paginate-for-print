@@ -1,8 +1,8 @@
 # License
 
-## paged-with-floats (this fork)
+## paginate-for-print (this fork)
 
-Everything generated, written and maintained as part of **paged-with-floats**
+Everything generated, written and maintained as part of **paginate-for-print**
 — in particular all modifications to the existing sources and all new files,
 including the page floats implementation (`src/modules/paged-media/page-floats.js`)
 and its supporting changes —
@@ -28,6 +28,6 @@ and [`COPYING`](./COPYING), and are available at
 This project began as a fork of [Paged.js](https://github.com/pagedjs/pagedjs).
 All code originally derived from Paged.js has since been replaced with
 independent implementations; the entirety of the current source tree is written
-and maintained as part of **paged-with-floats** and is licensed solely under
+and maintained as part of **paginate-for-print** and is licensed solely under
 the LGPL-3.0-or-later as stated above. The historical debt to Paged.js and its
 authors is documented in [`ACKNOWLEDGMENTS.md`](./ACKNOWLEDGMENTS.md).

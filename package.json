@@ -1,8 +1,8 @@
 {
-    "name": "paged-with-floats",
-    "version": "0.11.1",
+    "name": "paginate-for-print",
+    "version": "1.0.0",
     "packageManager": "pnpm@10.29.3",
-    "description": "Applies CSS for paged media",
+    "description": "Paginates web content in the browser for print and PDF generation",
     "author": "Johannes Wilm",
     "maintainers": [
         {
@@ -38,19 +38,19 @@
         "Patrick Kranz",
         "Rob Mayer",
         "Sam Ruby",
-        "Stéphane Elbaron",
+        "St\u00e9phane Elbaron",
         "Talbi Youssef",
         "Urban Suppiger",
         "Yann Trividic",
-        "Antoine Fauchié",
+        "Antoine Fauchi\u00e9",
         "mb21",
         "wangfengming",
         "wenbei421"
     ],
     "license": "LGPL-3.0-or-later",
-    "homepage": "https://github.com/johanneswilm/paged-with-floats#readme",
+    "homepage": "https://github.com/fiduswriter/paginate-for-print#readme",
     "bugs": {
-        "url": "https://github.com/johanneswilm/paged-with-floats/issues"
+        "url": "https://github.com/fiduswriter/paginate-for-print/issues"
     },
     "keywords": [
         "pagination",
@@ -128,7 +128,7 @@
     },
     "repository": {
         "type": "git",
-        "url": "https://github.com/johanneswilm/paged-with-floats.git"
+        "url": "https://github.com/fiduswriter/paginate-for-print.git"
     },
     "files": [
         "dist/paged.js",

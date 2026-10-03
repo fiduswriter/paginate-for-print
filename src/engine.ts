@@ -9,7 +9,7 @@ import { printHTML } from "./print.js";
  *
  * The object below is structurally compatible with the `PrintEngine`
  * interface defined by `@fiduswriter/document` without importing from it, so
- * the two pagination packages (`paged-with-floats` and `vivliostyle-pdf`)
+ * the two pagination packages (`paginate-for-print` and `vivliostyle-pdf`)
  * expose equivalent engine objects that host applications can register.
  */
 export interface PaginateConfig {
@@ -127,7 +127,7 @@ async function print(config: PaginateConfig): Promise<void> {
 		});
 		return;
 	}
-	// Without a printCallback, paged-with-floats prints the paginated
+	// Without a printCallback, paginate-for-print prints the paginated
 	// iframe directly and removes it afterwards.
 	await printHTML(config.html, {
 		title: config.title,
@@ -136,8 +136,8 @@ async function print(config: PaginateConfig): Promise<void> {
 	});
 }
 
-export const pagedWithFloatsEngine: PrintEngine = {
-	name: "paged-with-floats",
+export const paginateForPrintEngine: PrintEngine = {
+	name: "paginate-for-print",
 	preparePagination,
 	print,
 	backend: PAGED_WITH_FLOATS_BACKEND,

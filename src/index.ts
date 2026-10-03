@@ -28,7 +28,7 @@ export {
 	initializeHandlers
 } from "./utils/handlers.js";
 
-export { pagedWithFloatsEngine } from "./engine.js";
+export { paginateForPrintEngine } from "./engine.js";
 export type {
 	PaginateConfig,
 	PaginatedWindow,

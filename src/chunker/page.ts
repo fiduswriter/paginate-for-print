@@ -342,7 +342,7 @@ class Page {
 				.__PAGED_DEBUG;
 			if (debug && debug.stops) {
 				console.warn(
-					"[paged-with-floats] zero-progress page; token:",
+					"[paginate-for-print] zero-progress page; token:",
 					JSON.stringify({
 						nodeText: breakToken.node.textContent?.slice(0, 60),
 						offset: breakToken.overflow[0]?.offset,

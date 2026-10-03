@@ -23,7 +23,7 @@ const plugins = [
 	json(),
 	license({
 		banner:
-			" @license paged-with-floats v<%= pkg.version %>\n" +
+			" @license paginate-for-print v<%= pkg.version %>\n" +
 			"\n" +
 			" Copyright (C) 2026 Johannes Wilm\n" +
 			" Licensed under the GNU Lesser General Public License, version 3 or later\n" +

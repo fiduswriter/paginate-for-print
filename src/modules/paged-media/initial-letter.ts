@@ -68,7 +68,7 @@ class InitialLetter extends Handler {
 				elements = parsed.querySelectorAll(rule.selector);
 			} catch {
 				console.warn(
-					"paged-with-floats: invalid initial-letter selector:",
+					"paginate-for-print: invalid initial-letter selector:",
 					rule.selector,
 				);
 				continue;

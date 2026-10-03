@@ -4,7 +4,7 @@ Guidance for AI agents and contributors working in this repository.
 
 ## Project overview
 
-`paged-with-floats` is a fork of Paged.js. It chunks a document into paged-media
+`paginate-for-print` is a fork of Paged.js. It chunks a document into paged-media
 flows in the browser, applies print CSS (`@page`, page floats, footnotes,
 multi-column layout, `column-span`), and can export the result to PDF.
 
@@ -125,4 +125,4 @@ The examples are the fastest repro path:
 debugging, drive a headless browser (playwright-core is a devDependency) and
 read `getBoundingClientRect()`/`scrollHeight`/`clientHeight` on the
 `.paged_flow`, `.paged_columns`, and `.paged_column` elements, then filter
-console messages for `paged-with-floats:` warnings.
+console messages for `paginate-for-print:` warnings.

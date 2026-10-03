@@ -4,7 +4,7 @@
  * Mirrors the API documented in the vivliostyle-print README:
  *
  * ```ts
- * import { printHTML } from "paged-with-floats";
+ * import { printHTML } from "paginate-for-print";
  *
  * printHTML(htmlDoc, {
  *     title: "my printed page",
@@ -14,7 +14,7 @@
  * ```
  *
  * Instead of vivliostyle's layout engine, the given document is paginated
- * by paged-with-floats inside a hidden same-origin iframe that loads this library's
+ * by paginate-for-print inside a hidden same-origin iframe that loads this library's
  * polyfill bundle. When pagination has finished, `printCallback` receives
  * the iframe window (for e.g. htmlToPDF); without a
  * callback the iframe prints directly and is removed.
@@ -33,7 +33,7 @@ export interface PrintHTMLConfig {
 	/** Called with a message when something goes wrong. */
 	errorCallback?: (message: string) => void;
 	/**
-	 * URL of the paged-with-floats polyfill bundle (`dist/paged.polyfill.js`) to
+	 * URL of the paginate-for-print polyfill bundle (`dist/paged.polyfill.js`) to
 	 * load inside the iframe. Defaults to a URL relative to this bundle,
 	 * which works when dist/ output is served as-is.
 	 */
@@ -109,7 +109,7 @@ export function printHTML(
 			if (config.errorCallback) {
 				config.errorCallback(message);
 			} else {
-				console.error("paged-with-floats printHTML:", message);
+				console.error("paginate-for-print printHTML:", message);
 			}
 			resolve(iframe);
 		};

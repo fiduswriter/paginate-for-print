@@ -412,7 +412,7 @@ class Previewer {
 
 		if (flow.overflowViolations.length) {
 			console.warn(
-				`paged-with-floats: ${flow.overflowViolations.length} page(s) contain content outside its designated space`,
+				`paginate-for-print: ${flow.overflowViolations.length} page(s) contain content outside its designated space`,
 				flow.overflowViolations.slice(0, 5),
 			);
 		}
@@ -421,7 +421,7 @@ class Previewer {
 
 		if (flow.warnings.length) {
 			console.warn(
-				`paged-with-floats: ${flow.warnings.length} rendering warning(s) (available on flow.warnings)`,
+				`paginate-for-print: ${flow.warnings.length} rendering warning(s) (available on flow.warnings)`,
 			);
 		}
 

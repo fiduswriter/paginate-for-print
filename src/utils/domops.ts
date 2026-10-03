@@ -1,5 +1,5 @@
 /**
- * Opt-in counters for layout-triggering DOM reads performed by paged-with-floats.
+ * Opt-in counters for layout-triggering DOM reads performed by paginate-for-print.
  *
  * Installed lazily (settings.debugDomOps or window.__PAGED_DEBUG.domops)
  * by wrapping the relevant prototype accessors; zero overhead otherwise.

@@ -583,7 +583,7 @@ export function prepareTextsEagerly(
 		}
 	} catch (error) {
 		console.warn(
-			"paged-with-floats: eager text preparation failed: " +
+			"paginate-for-print: eager text preparation failed: " +
 				(error as Error).message,
 		);
 	}
@@ -880,7 +880,7 @@ class Layout {
 		}
 		if (nested) {
 			console.warn(
-				"paged-with-floats: nested multi-column containers are not supported; rendering the inner container as a single column.",
+				"paginate-for-print: nested multi-column containers are not supported; rendering the inner container as a single column.",
 			);
 			(el as HTMLElement).style.columnCount = "1";
 			this.fragmentainerMeta.set(el, {
@@ -1309,7 +1309,7 @@ class Layout {
 	): void {
 		if (!dest) {
 			console.warn(
-				"paged-with-floats: addOverflowToPage called with null dest",
+				"paginate-for-print: addOverflowToPage called with null dest",
 				new Error().stack,
 			);
 			return;
@@ -2314,7 +2314,7 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 		while (overflowResult) {
 			if (iterations >= 100) {
 				console.error(
-					"paged-with-floats: overflow collection guard exceeded; bailing out.",
+					"paginate-for-print: overflow collection guard exceeded; bailing out.",
 				);
 				break;
 			}
@@ -2795,7 +2795,7 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 			iterations++;
 			if (iterations >= 10) {
 				console.warn(
-					"paged-with-floats: stopped re-extracting residual overflow on a page (guard limit)",
+					"paginate-for-print: stopped re-extracting residual overflow on a page (guard limit)",
 				);
 				break;
 			}
@@ -2822,7 +2822,7 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 				}
 			} catch (error) {
 				console.warn(
-					"paged-with-floats: residual overflow sweep failed: " +
+					"paginate-for-print: residual overflow sweep failed: " +
 						(error as Error).message,
 				);
 				break;
@@ -5125,7 +5125,7 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 			iterations++;
 			if (iterations > 10000) {
 				console.error(
-					"paged-with-floats: layout main loop guard exceeded; bailing out. node=",
+					"paginate-for-print: layout main loop guard exceeded; bailing out. node=",
 					node ? node.nodeName : node,
 					"done=",
 					done,
@@ -5338,7 +5338,7 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 				if (newBreakToken && newBreakToken.equals(prevBreakToken)) {
 					this.failed = true;
 					console.warn(
-						"paged-with-floats: unable to layout item, stopping render: " +
+						"paginate-for-print: unable to layout item, stopping render: " +
 							node,
 					);
 					return new RenderResult(

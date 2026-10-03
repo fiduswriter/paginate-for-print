@@ -61,7 +61,7 @@ class BoxDecoration extends Handler {
 				elements = fragment.querySelectorAll(selector);
 			} catch {
 				console.warn(
-					"paged-with-floats: invalid box-decoration-break selector:",
+					"paginate-for-print: invalid box-decoration-break selector:",
 					selector,
 				);
 				continue;

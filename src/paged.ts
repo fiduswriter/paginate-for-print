@@ -1,9 +1,9 @@
 /**
- * Public paged-with-floats API.
+ * Public paginate-for-print API.
  *
- * `paged-with-floats` exposes three helpers:
+ * `paginate-for-print` exposes three helpers:
  *
- * 1. `printHTML(html, config)` — paginates `html` with paged-with-floats inside
+ * 1. `printHTML(html, config)` — paginates `html` with paginate-for-print inside
  *    a hidden iframe and hands the window to `printCallback` (default: browser
  *    print dialog).
  *
@@ -14,7 +14,7 @@
  *    call, with iframe cleanup handled internally.
  *
  * ```ts
- * import { htmlToPDF } from "paged-with-floats";
+ * import { htmlToPDF } from "paginate-for-print";
  *
  * const bytes = await htmlToPDF(htmlDoc, {
  *     title: "My document",
@@ -36,7 +36,7 @@ export {
 	type PrintHTMLConfig,
 } from "./print.js";
 
-export { pagedWithFloatsEngine } from "./engine.js";
+export { paginateForPrintEngine } from "./engine.js";
 export type {
 	PaginateConfig,
 	PaginatedWindow,
@@ -50,7 +50,7 @@ export type {
 export interface RenderHTMLOptions {
 	/** Applied to the paginated iframe document. */
 	title?: string;
-	/** URL of the paged-with-floats polyfill bundle for the frame. */
+	/** URL of the paginate-for-print polyfill bundle for the frame. */
 	polyfillURL?: string;
 	/** Extra Previewer settings (textMeasurement etc.). */
 	settings?: Record<string, unknown>;
@@ -59,7 +59,7 @@ export interface RenderHTMLOptions {
 }
 
 /**
- * Paginates `html` with paged-with-floats and renders the result visibly
+ * Paginates `html` with paginate-for-print and renders the result visibly
  * inside `container`. No print dialog is opened and the iframe stays in the
  * supplied container.
  *
@@ -92,7 +92,7 @@ export async function renderHTML(
 export interface HtmlToPDFOptions {
 	/** Applied to the paginated iframe document and default PDF title. */
 	title?: string;
-	/** URL of the paged-with-floats polyfill bundle for the print frame. */
+	/** URL of the paginate-for-print polyfill bundle for the print frame. */
 	polyfillURL?: string;
 	/** Extra Previewer settings (textMeasurement etc.). */
 	settings?: Record<string, unknown>;
@@ -113,7 +113,7 @@ export interface HtmlToPDFOptions {
 }
 
 /**
- * Paginates `html` with paged-with-floats and returns real vector PDF bytes —
+ * Paginates `html` with paginate-for-print and returns real vector PDF bytes —
  * no print dialog involved.
  *
  * @param html - A complete HTML document string.

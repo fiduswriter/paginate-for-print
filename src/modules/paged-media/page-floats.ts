@@ -202,7 +202,7 @@ class PageFloats extends Handler {
 		if (value === "left" || value === "right") {
 			if (selectors.every((selector) => this.floatReferences[selector])) {
 				console.warn(
-					"paged-with-floats: float:",
+					"paginate-for-print: float:",
 					value,
 					"with float-reference: page is placed as a top page float",
 				);
@@ -214,7 +214,7 @@ class PageFloats extends Handler {
 				selectors.some((selector) => this.floatReferences[selector])
 			) {
 				console.warn(
-					"paged-with-floats: ignoring unsupported combination of float:",
+					"paginate-for-print: ignoring unsupported combination of float:",
 					value,
 					"and float-reference: page",
 				);
@@ -235,7 +235,7 @@ class PageFloats extends Handler {
 			try {
 				elements = parsed.querySelectorAll(selector);
 			} catch {
-				console.warn("paged-with-floats: invalid page float selector:", selector);
+				console.warn("paginate-for-print: invalid page float selector:", selector);
 				continue;
 			}
 			Array.from(elements).forEach((element) => {
@@ -509,7 +509,7 @@ class PageFloats extends Handler {
 
 		if (oversized) {
 			console.warn(
-				"paged-with-floats: page float is taller than the page area; placing anyway",
+				"paginate-for-print: page float is taller than the page area; placing anyway",
 			);
 		}
 
@@ -572,7 +572,7 @@ class PageFloats extends Handler {
 			this.deferredCounts[ref] = (this.deferredCounts[ref] || 0) + 1;
 			if (this.deferredCounts[ref] > MAX_DEFERRALS) {
 				console.warn(
-					"paged-with-floats: page float deferred more than",
+					"paginate-for-print: page float deferred more than",
 					MAX_DEFERRALS,
 					"times; forcing placement",
 				);
@@ -886,7 +886,7 @@ class PageFloats extends Handler {
 			}
 			if (height <= 0) {
 				console.warn(
-					"paged-with-floats: page float measured with zero height while containing images; " +
+					"paginate-for-print: page float measured with zero height while containing images; " +
 						"the images may not have finished loading before measurement",
 				);
 			}

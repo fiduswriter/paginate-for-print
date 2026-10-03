@@ -1,13 +1,13 @@
-<img style="display: block; margin: 3em auto;" src="assets/logo.svg" alt="paged-with-floats — a block floating above a paginated page"/>
+<img style="display: block; margin: 3em auto;" src="assets/logo.svg" alt="paginate-for-print — a block floating above a paginated page"/>
 
-[![CI](https://github.com/fiduswriter/paged-with-floats/actions/workflows/ci.yml/badge.svg)](https://github.com/fiduswriter/paged-with-floats/actions/workflows/ci.yml)
+[![CI](https://github.com/fiduswriter/paginate-for-print/actions/workflows/ci.yml/badge.svg)](https://github.com/fiduswriter/paginate-for-print/actions/workflows/ci.yml)
 
-**Live demos:** <https://fiduswriter.github.io/paged-with-floats/>
+**Live demos:** <https://fiduswriter.github.io/paginate-for-print/>
 
-paged-with-floats
+paginate-for-print
 ==================
 
-**paged-with-floats** is an open-source library to display paginated content
+**paginate-for-print** is an open-source library to display paginated content
 in the browser and to generate print books using web technology. It polyfills
 the [Paged Media](https://www.w3.org/TR/css-page-3/) and
 [Generated Content for Paged Media](https://www.w3.org/TR/css-gcpm-3/) CSS
@@ -140,7 +140,7 @@ The public API is published as the root export of the npm package and
 exposes three helpers:
 
 ```ts
-import { printHTML, renderHTML, htmlToPDF } from "paged-with-floats";
+import { printHTML, renderHTML, htmlToPDF } from "paginate-for-print";
 
 // 1. Paginate HTML in a hidden iframe, then print or process it.
 printHTML(htmlDoc, {
@@ -169,7 +169,7 @@ pass the iframe window to `emitPdfFromWindow` from the separate
 library (LGPL-3.0-or-later):
 
 ```ts
-import { printHTML } from "paged-with-floats";
+import { printHTML } from "paginate-for-print";
 import { emitPdfFromWindow } from "pages-to-pdf";
 
 const iframe = await printHTML(htmlDoc, {
@@ -184,7 +184,7 @@ const iframe = await printHTML(htmlDoc, {
 });
 ```
 
-`paged-with-floats` configures `pages-to-pdf` with the paged-with-floats
+`paginate-for-print` configures `pages-to-pdf` with the paginate-for-print
 backend preset, so no explicit backend is required.
 
 Fallback fonts for documents without `@font-face` rules are bundled in
@@ -199,16 +199,16 @@ The library is written in strict TypeScript and ships type declarations for
 the public API:
 
 ```ts
-import { printHTML, htmlToPDF, type PrintHTMLConfig } from "paged-with-floats";
+import { printHTML, htmlToPDF, type PrintHTMLConfig } from "paginate-for-print";
 ```
 
 ## NPM Module
 ```sh
-$ npm install paged-with-floats
+$ npm install paginate-for-print
 ```
 
 ```js
-import { htmlToPDF } from "paged-with-floats";
+import { htmlToPDF } from "paginate-for-print";
 
 const bytes = await htmlToPDF(`<!doctype html>
 <html>
@@ -238,7 +238,7 @@ It replaces all `@page` CSS and renders the page with Paged Media styles
 applied:
 
 ```html
-<script src="https://unpkg.com/paged-with-floats/dist/paged.polyfill.js"></script>
+<script src="https://unpkg.com/paginate-for-print/dist/paged.polyfill.js"></script>
 ```
 
 By default the polyfill will run automatically as soon as the DOM is ready.
@@ -289,7 +289,7 @@ When the polyfill bundle (`dist/paged.polyfill.js`) runs it exposes a global
 polyfill:
 
 ```html
-<script src="https://unpkg.com/paged-with-floats/dist/paged.polyfill.js"></script>
+<script src="https://unpkg.com/paginate-for-print/dist/paged.polyfill.js"></script>
 <script>
 	class MyHandler extends Paged.Handler {
 		constructor(chunker, polisher, caller) {
@@ -340,7 +340,7 @@ afterOverflowRemoved(removed, rendered)
 beforeRenderResult(breakToken, pageWrapper)
 ```
 
-## How paged-with-floats processes content
+## How paginate-for-print processes content
 
 Chunker.flow()\
 └── Chunker.render() -> Looping through all pages\
@@ -484,18 +484,18 @@ development or publishing.
 The render-baseline jobs build the image themselves; to build it manually run
 
 ```bash
-docker build -t paged-with-floats .
+docker build -t paginate-for-print .
 ```
 
 By default the container will run the development server with `npm start`
 
 ```bash
-docker run -it -p 9090:9090 paged-with-floats
+docker run -it -p 9090:9090 paginate-for-print
 ```
 
 ## License
 
-Everything generated as part of **paged-with-floats** — all modifications and
+Everything generated as part of **paginate-for-print** — all modifications and
 additions made in this repository, including the complete page floats
 implementation — is
 

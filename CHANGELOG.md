@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.0.0 (2026-10-03)
+
+### Breaking
+
+- **The project is now the complete pagination engine formerly developed as
+  `paged-with-floats`**, merged into this repository. The old 0.0.x
+  page-cutting implementation has been retired; the two git histories are
+  joined at the merge commit.
+- The npm package to install is `paginate-for-print`; the `paged-with-floats`
+  package is deprecated.
+- The public engine export is renamed:
+  `pagedWithFloatsEngine` → `paginateForPrintEngine`. `printHTML`,
+  `renderHTML` and `htmlToPDF` are unchanged.
+
+### Added
+
+- A full CSS Paged Media polyfill: `@page` rules with `size`, `bleed` and
+  `marks`, page margin boxes, named pages, and the page selectors `:first`,
+  `:blank`, `:nth()`, `:left`, `:right`, `:recto` and `:verso`.
+- **CSS page floats** (`float-reference: page | column | inline`), including
+  floats inside multi-column layouts.
+- **Footnotes** (`float: footnote`, footnote calls and markers, footnote
+  areas, `footnote-policy`).
+- **Manual multi-column layout** (`column-count` on the page root) with
+  `column-span: all` support.
+- Generated content: `leader()`, `target-counter()`, `target-counters()`,
+  `string()` (`first`/`last`/`start`/`first-except`), running elements
+  (`position: running()` / `element()`), `content(first-letter)` handling.
+- Fragmentation control: `break-before` / `break-after` / `break-inside`,
+  `box-decoration-break: clone` on splits, widows/orphans support.
+- **PDF export** built in: `printHTML()`, `renderHTML()` and `htmlToPDF()`
+  (via `pages-to-pdf`), plus the `paginateForPrintEngine` entry point for
+  custom pipelines.
+- A Chromium-based spec suite (`npm run specs`) alongside the jsdom unit
+  tests.
+
+### Changed
+
+- **Clean-room rewrite**: all code formerly derived from Paged.js has been
+  replaced with independent implementations. The project is now wholly
+  **LGPL-3.0-or-later**; the MIT license notice for Paged.js code has been
+  dropped. Paged.js and its authors are acknowledged in
+  `ACKNOWLEDGMENTS.md`.
+
 ## 0.10.0 (2026-09-01)
 
 ### Breaking

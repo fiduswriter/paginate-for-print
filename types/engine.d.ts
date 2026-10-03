@@ -5,7 +5,7 @@ import type { BackendConfig } from "pages-to-pdf";
  *
  * The object below is structurally compatible with the `PrintEngine`
  * interface defined by `@fiduswriter/document` without importing from it, so
- * the two pagination packages (`paged-with-floats` and `vivliostyle-pdf`)
+ * the two pagination packages (`paginate-for-print` and `vivliostyle-pdf`)
  * expose equivalent engine objects that host applications can register.
  */
 export interface PaginateConfig {
@@ -53,5 +53,5 @@ export interface PrintEngine {
     /** DOM-to-PDF emitter configuration matching this engine's output. */
     backend: BackendConfig;
 }
-export declare const pagedWithFloatsEngine: PrintEngine;
+export declare const paginateForPrintEngine: PrintEngine;
 //# sourceMappingURL=engine.d.ts.map
