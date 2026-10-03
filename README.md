@@ -507,9 +507,8 @@ as [`COPYING.LESSER`](./COPYING.LESSER) (LGPL-3.0) and [`COPYING`](./COPYING)
 (GPL-3.0, which the LGPL incorporates); see also
 <https://www.gnu.org/licenses/>. The project's history as a Paged.js fork and
 the replacement of all upstream-derived code are documented in
-[`LICENSE.md`](./LICENSE.md), the
-[Acknowledgments](./ACKNOWLEDGMENTS.md), and
-[`MIT_LICENSE_TRACKING.md`](./MIT_LICENSE_TRACKING.md).
+[`LICENSE.md`](./LICENSE.md) and the
+[Acknowledgments](./ACKNOWLEDGMENTS.md).
 
 ## Acknowledgments
 

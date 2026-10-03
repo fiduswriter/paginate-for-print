@@ -25,11 +25,9 @@ and [`COPYING`](./COPYING), and are available at
 
 ## Provenance
 
-This project began as a fork of [Paged.js](https://github.com/pagedjs/pagedjs)
-(MIT-licensed, Copyright (c) 2018 Adam Hyde). All code originally derived from
-Paged.js has since been replaced with independent implementations; the entirety
-of the current source tree is written and maintained as part of
-**paged-with-floats** and is licensed solely under the LGPL-3.0-or-later as
-stated above. The historical debt to Paged.js and its authors is documented in
-[`ACKNOWLEDGMENTS.md`](./ACKNOWLEDGMENTS.md), and the replacement effort is
-traced in [`MIT_LICENSE_TRACKING.md`](./MIT_LICENSE_TRACKING.md).
+This project began as a fork of [Paged.js](https://github.com/pagedjs/pagedjs).
+All code originally derived from Paged.js has since been replaced with
+independent implementations; the entirety of the current source tree is written
+and maintained as part of **paged-with-floats** and is licensed solely under
+the LGPL-3.0-or-later as stated above. The historical debt to Paged.js and its
+authors is documented in [`ACKNOWLEDGMENTS.md`](./ACKNOWLEDGMENTS.md).

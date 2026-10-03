@@ -72,9 +72,8 @@ Thank you — every page rendered by this library rests on your work.
 
 This project began as a fork of [Paged.js](https://github.com/pagedjs/pagedjs).
 All code originally derived from Paged.js has since been replaced with
-independent implementations (traced in
-[`MIT_LICENSE_TRACKING.md`](./MIT_LICENSE_TRACKING.md)), so the entirety of the
-current source is written and maintained as part of **paged-with-floats** and
+independent implementations, so the entirety of the current source is written
+and maintained as part of **paged-with-floats** and
 is licensed under the **GNU Lesser General Public License, version 3 or later
 (LGPL-3.0-or-later)** — see the [License](./README.md#license) section and the
 full license texts in [`COPYING.LESSER`](./COPYING.LESSER) and
