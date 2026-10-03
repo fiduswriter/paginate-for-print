@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8" />
+	<title>paged-with-floats — text measurement benchmark</title>
+	<style>
+		body { font-family: sans-serif; margin: 2rem; }
+		table { border-collapse: collapse; margin-top: 1rem; }
+		td, th { border: 1px solid #999; padding: 0.4rem 0.8rem; text-align: left; }
+	</style>
+	<script>
+		// Text measurement mode for this run:
+		//   (default)  legacy DOM-only walker (library default, fastest)
+		//   ?mode=pretext  predicted breaking, verified against DOM rects
+		//   ?mode=fast     pure prediction only, audited after render
+		const params = new URLSearchParams(window.location.search);
+		const mode = params.get("mode") || "dom";
+		const settings =
+			mode === "pretext"
+				? { textMeasurement: "pretext" }
+				: mode === "fast"
+					? { textMeasurement: "pretext", verifyTextPrediction: false }
+					: { textMeasurement: "dom" };
+		window.PagedConfig = {
+			auto: true,
+			settings,
+			after: (flow) => {
+				const target = document.getElementById("bench-result");
+				if (target && flow && typeof flow.performance === "number") {
+					target.textContent =
+						flow.pages.length + " pages in " +
+						Math.round(flow.performance) + " ms (" +
+						mode + " mode; violations: " +
+						(flow.overflowViolations
+							? flow.overflowViolations.length
+							: "n/a") + ")";
+				}
+			},
+		};
+	</script>
+	<style>
+		@page {
+			size: 140mm 200mm;
+			margin: 20mm;
+		}
+		p {
+			line-height: 22px;
+			font-family: "Times New Roman", serif;
+		}
+	</style>
+	<script src="../dist/paged.polyfill.js"></script>
+</head>
+<body>
+	<h1>Text measurement benchmark</h1>
+	<p id="bench-result">rendering…</p>
+	<p>
+		This document paginates itself with the configured measurement mode.
+		Default is the pretext-predicted text breaker; open
+		<code>?mode=dom</code> to run the legacy DOM-only walker and compare
+		the reported durations on the same content.
+	</p>
+	<script>
+		const lorem =
+			"Lorem ipsum dolor sit amet consectetur adipiscing elit sed do " +
+			"eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim " +
+			"ad minim veniam quis nostrud exercitation ullamco laboris nisi ut ";
+		const container = document.createElement("div");
+		container.id = "benchmark-content";
+		for (let i = 0; i < 400; i++) {
+			const p = document.createElement("p");
+			p.textContent = lorem.repeat(4);
+			container.appendChild(p);
+		}
+		document.body.appendChild(container);
+	</script>
+</body>
+</html>

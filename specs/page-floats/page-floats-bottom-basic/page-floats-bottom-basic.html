@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8" />
+	<title>Page floats bottom basic</title>
+	<script src="../../../dist/paged.polyfill.js"></script>
+	<style>
+@page {
+	size: 200mm 300mm;
+	margin: 20mm;
+}
+
+p {
+	margin: 0;
+	font-size: 14px;
+	line-height: 16px;
+}
+
+figure {
+	margin: 0;
+	background: #ddd;
+}
+
+figure.float {
+	float-reference: page;
+	float: bottom;
+	height: 30mm;
+}
+	</style>
+</head>
+
+<body>
+
+<p id="alpha">Alpha paragraph above the bottom float.</p>
+<p id="beta">Beta paragraph above the bottom float.</p>
+<figure class="float" id="float-b"><figcaption>Float B</figcaption></figure>
+
+</body>
+
+</html>

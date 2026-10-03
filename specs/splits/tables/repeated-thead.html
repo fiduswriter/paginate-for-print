@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<title>repeated-thead</title>
+	<script src="../../../dist/paged.polyfill.js"></script>
+	<style>
+		@page {
+			size: 600px 400px;
+			border: 1px solid #cfc2c2;
+		}
+
+		table {
+			border-collapse: collapse;
+			width: 100%;
+		}
+
+		table, th, td {
+			border: 1px solid black;
+		}
+
+		th, td {
+			padding: 4px 8px;
+		}
+
+		thead th {
+			background: #444;
+			color: white;
+		}
+	</style>
+</head>
+<body>
+<p>Before the table.</p>
+<table id="t1">
+	<thead>
+	<tr>
+		<th>Head 1</th>
+		<th>Head 2</th>
+		<th>Head 3</th>
+	</tr>
+	</thead>
+	<tbody>
+		<tr><td>Cell A1</td><td>Cell B1</td><td>Cell C1</td></tr>
+		<tr><td>Cell A2</td><td>Cell B2</td><td>Cell C2</td></tr>
+		<tr><td>Cell A3</td><td>Cell B3</td><td>Cell C3</td></tr>
+		<tr><td>Cell A4</td><td>Cell B4</td><td>Cell C4</td></tr>
+		<tr><td>Cell A5</td><td>Cell B5</td><td>Cell C5</td></tr>
+		<tr><td>Cell A6</td><td>Cell B6</td><td>Cell C6</td></tr>
+		<tr><td>Cell A7</td><td>Cell B7</td><td>Cell C7</td></tr>
+		<tr><td>Cell A8</td><td>Cell B8</td><td>Cell C8</td></tr>
+		<tr><td>Cell A9</td><td>Cell B9</td><td>Cell C9</td></tr>
+		<tr><td>Cell A10</td><td>Cell B10</td><td>Cell C10</td></tr>
+		<tr><td>Cell A11</td><td>Cell B11</td><td>Cell C11</td></tr>
+		<tr><td>Cell A12</td><td>Cell B12</td><td>Cell C12</td></tr>
+		<tr><td>Cell A13</td><td>Cell B13</td><td>Cell C13</td></tr>
+		<tr><td>Cell A14</td><td>Cell B14</td><td>Cell C14</td></tr>
+		<tr><td>Cell A15</td><td>Cell B15</td><td>Cell C15</td></tr>
+		<tr><td>Cell A16</td><td>Cell B16</td><td>Cell C16</td></tr>
+		<tr><td>Cell A17</td><td>Cell B17</td><td>Cell C17</td></tr>
+		<tr><td>Cell A18</td><td>Cell B18</td><td>Cell C18</td></tr>
+		<tr><td>Cell A19</td><td>Cell B19</td><td>Cell C19</td></tr>
+		<tr><td>Cell A20</td><td>Cell B20</td><td>Cell C20</td></tr>
+	</tbody>
+</table>
+<p>After the table.</p>
+</body>
+</html>

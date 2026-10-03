@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<style>
+		body {
+			column-count: 2;
+			column-gap: 10mm;
+		}
+		@page {
+			size: 140mm 200mm;
+			margin: 20mm;
+		}
+		h2 {
+			column-span: all;
+		}
+		p {
+			line-height: 22px;
+		}
+	</style>
+	<script src="../../../dist/paged.polyfill.js"></script>
+</head>
+<body>
+	<p>Before the spanning header there is some text filling the first columns of the page here now.</p>
+	<h2 id="span-header">A header spanning every column</h2>
+	<p>After the spanning header more text follows to fill the remaining columns of the page with words.</p>
+</body>
+</html>

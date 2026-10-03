@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8" />
+	<title>Page floats deferral</title>
+	<script src="../../../dist/paged.polyfill.js"></script>
+	<style>
+@page {
+	size: 200mm 300mm;
+	margin: 20mm;
+}
+
+p {
+	margin: 0;
+	font-size: 14px;
+	line-height: 16px;
+}
+
+figure {
+	margin: 0;
+	background: #ddd;
+}
+
+figure.deferred {
+	float-reference: page;
+	float: top;
+	height: 100mm;
+}
+	</style>
+</head>
+
+<body>
+
+	<p class="filler">Filler line 1 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 2 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 3 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 4 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 5 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 6 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 7 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 8 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 9 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 10 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 11 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 12 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 13 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 14 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 15 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 16 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 17 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 18 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 19 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 20 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 21 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 22 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 23 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 24 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 25 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 26 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 27 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 28 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 29 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 30 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 31 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 32 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 33 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 34 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 35 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 36 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 37 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 38 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 39 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 40 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 41 flows through the page like ordinary running text would.</p>
+	<p class="filler">Filler line 42 flows through the page like ordinary running text would.</p>
+<figure class="deferred" id="big"><figcaption>Big deferred float</figcaption></figure>
+<p id="after">Paragraph following the deferred float.</p>
+
+</body>
+
+</html>

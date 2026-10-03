@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<title>header-orphan</title>
+	<script src="../../../dist/paged.polyfill.js"></script>
+	<style>
+		@page {
+			size: 600px 400px;
+			border: 1px solid #cfc2c2;
+		}
+
+		table {
+			border-collapse: collapse;
+			width: 100%;
+		}
+
+		table, th, td {
+			border: 1px solid black;
+		}
+
+		tbody td {
+			height: 24px;
+		}
+
+		thead th {
+			height: 100px;
+		}
+	</style>
+</head>
+<body>
+	<p>Filler paragraph 1 with some text to take up space in the flow.</p>
+	<p>Filler paragraph 2 with some text to take up space in the flow.</p>
+	<p>Filler paragraph 3 with some text to take up space in the flow.</p>
+	<p>Filler paragraph 4 with some text to take up space in the flow.</p>
+	<p>Filler paragraph 5 with some text to take up space in the flow.</p>
+	<table id="t1">
+		<caption>Caption of the table</caption>
+		<thead>
+		<tr>
+			<th>Head 1</th>
+			<th>Head 2</th>
+			<th>Head 3</th>
+		</tr>
+		</thead>
+		<tbody>
+			<tr><td>Cell A1</td><td>Cell B1</td><td>Cell C1</td></tr>
+			<tr><td>Cell A2</td><td>Cell B2</td><td>Cell C2</td></tr>
+			<tr><td>Cell A3</td><td>Cell B3</td><td>Cell C3</td></tr>
+			<tr><td>Cell A4</td><td>Cell B4</td><td>Cell C4</td></tr>
+			<tr><td>Cell A5</td><td>Cell B5</td><td>Cell C5</td></tr>
+			<tr><td>Cell A6</td><td>Cell B6</td><td>Cell C6</td></tr>
+			<tr><td>Cell A7</td><td>Cell B7</td><td>Cell C7</td></tr>
+			<tr><td>Cell A8</td><td>Cell B8</td><td>Cell C8</td></tr>
+		</tbody>
+	</table>
+	<p>After the table.</p>
+</body>
+</html>

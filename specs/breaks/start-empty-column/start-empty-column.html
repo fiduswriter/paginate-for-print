@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<style>
+		body {
+			column-count: 2;
+			column-gap: 12mm;
+		}
+		@page {
+			size: 140mm 200mm;
+			margin: 20mm;
+		}
+		p {
+			line-height: 22px;
+		}
+		.break-before-column {
+			break-before: column;
+		}
+	</style>
+	<script src="../../../dist/paged.polyfill.js"></script>
+</head>
+<body>
+	<p class="break-before-column first">A break-before on the first element should not create an empty first column.</p>
+</body>
+</html>

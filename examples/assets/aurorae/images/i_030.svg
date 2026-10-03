@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 18" width="60" height="18" role="img" aria-label="Aurora arches">
+	<g fill="none" stroke="#333" stroke-width="1.3" stroke-linecap="round">
+		<path d="M1 16 A10 10 0 0 1 21 16"/>
+		<path d="M5 16 A6 6 0 0 1 17 16"/>
+		<path d="M23 16 A10 10 0 0 1 43 16"/>
+		<path d="M27 16 A6 6 0 0 1 39 16"/>
+		<path d="M47 16 A10 10 0 0 1 59 10"/>
+		<line x1="0.7" y1="16" x2="59.3" y2="16"/>
+	</g>
+</svg>

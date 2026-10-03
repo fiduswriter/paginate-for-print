@@ -1,0 +1,12 @@
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": false,
+		"declaration": true,
+		"declarationMap": true,
+		"emitDeclarationOnly": true,
+		"outDir": "./types",
+		"rootDir": "./src"
+	},
+	"include": ["src/paged.ts", "src/print.ts", "src/engine.ts"]
+}

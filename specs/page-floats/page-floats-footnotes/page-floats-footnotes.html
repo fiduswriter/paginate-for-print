@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8" />
+	<title>Page floats with footnotes</title>
+	<script src="../../../dist/paged.polyfill.js"></script>
+	<style>
+@page {
+	size: 200mm 300mm;
+	margin: 20mm;
+}
+
+p {
+	margin: 0;
+	font-size: 14px;
+	line-height: 16px;
+}
+
+figure {
+	margin: 0;
+	background: #eee;
+}
+
+figure.pf {
+	float-reference: page;
+	float: top;
+	height: 25mm;
+}
+
+span.fn {
+	float: footnote;
+	font-size: 10px;
+}
+	</style>
+</head>
+
+<body>
+
+<figure class="pf" id="pf-one"><figcaption>Page float with footnotes</figcaption></figure>
+<p>Lorem ipsum dolor sit amet<span class="fn">This note shares the page with a page float.</span>, consectetur adipiscing elit.</p>
+<p>More text follows the note.</p>
+
+</body>
+
+</html>

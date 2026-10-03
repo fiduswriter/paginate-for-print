@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<title>paged-with-floats — demos</title>
+	<meta name="description" content="Live demonstrations of paged-with-floats: page floats, footnotes, multi-column pagination and PDF export.">
+	<link rel="icon" href="data:,">
+	<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+<header class="site-header">
+	<img src="../assets/logo.svg" alt="paged-with-floats logo">
+	<span class="site-name">paged-with-floats</span>
+	<nav>
+		<a href="../">Home</a>
+		<a href="https://github.com/fiduswriter/paged-with-floats">GitHub</a>
+	</nav>
+</header>
+
+<main>
+	<section class="hero">
+		<h1>Demos</h1>
+		<p class="lede">Live demonstrations of <strong>paged-with-floats</strong>:
+		CSS page floats, footnotes, multi-column pagination, running headers
+		and page numbers — paginated entirely in the browser.</p>
+	</section>
+
+	<p class="group-title">Editable playground</p>
+	<section class="cards">
+		<a class="card" href="multicol-floats.html">
+			<div class="thumb"><img src="assets/images/map-of-malay-archipelago-wallace-1869.jpg" alt="Fold-out map from Wallace's The Malay Archipelago"></div>
+			<div class="body">
+				<h2>The Malay Archipelago</h2>
+				<p>Two-column flow with page floats
+				(<code>float-reference: page; float: top</code>) spanning both
+				columns, footnotes at the page bottom, running chapter heads.
+				Edit the HTML source in the textarea, then hit “Render pages”
+				or “Download PDF”.</p>
+				<span class="tag">Editable · PDF export</span>
+			</div>
+		</a>
+	</section>
+
+	<p class="group-title">Whole books in two to four columns</p>
+	<section class="cards">
+		<a class="card" href="books/alice-2col.html">
+			<div class="thumb letter" style="background:linear-gradient(135deg,#e3f2f4,#cfe7ea);color:#087f90;">Aa</div>
+			<div class="body">
+				<h2>Alice’s Adventures in Wonderland</h2>
+				<p>Lewis Carroll, two columns.</p>
+				<span class="tag">2 columns</span>
+			</div>
+		</a>
+		<a class="card" href="books/frankenstein-3col.html">
+			<div class="thumb letter" style="background:linear-gradient(135deg,#ece4d4,#d9cdb4);color:#6d5a32;">Ff</div>
+			<div class="body">
+				<h2>Frankenstein</h2>
+				<p>Mary Wollstonecraft Shelley, three columns.</p>
+				<span class="tag">3 columns</span>
+			</div>
+		</a>
+		<a class="card" href="books/moby-4col.html">
+			<div class="thumb letter" style="background:linear-gradient(135deg,#dde4ee,#c3cede);color:#33415e;">Mm</div>
+			<div class="body">
+				<h2>Moby-Dick</h2>
+				<p>Herman Melville, four columns.</p>
+				<span class="tag">4 columns</span>
+			</div>
+		</a>
+	</section>
+
+	<p class="group-title">Ornamented specimen book</p>
+	<section class="cards">
+		<a class="card" href="previewer.html">
+			<div class="thumb"><img src="assets/aurorae/images/cover.jpg" alt="Gilt and blue cover of Auroræ: Their Characters and Spectra"></div>
+			<div class="body">
+				<h2>Auroræ — Their Characters and Spectra</h2>
+				<p>J. Rand Capron’s 1886 aurora monograph, a Victorian
+				sample book with gilt cover, plates, initials and ornaments,
+				paginated through the previewer API.</p>
+				<span class="tag">Previewer API</span>
+			</div>
+		</a>
+	</section>
+
+	<p class="group-title">Print &amp; PDF export</p>
+	<section class="cards">
+		<a class="card" href="measurement-benchmark.html">
+			<div class="thumb letter" style="background:linear-gradient(135deg,#efe6df,#e0cfc2);color:#8a4b32;">Pp</div>
+			<div class="body">
+				<h2>Measurement benchmark</h2>
+				<p>Stress-test the text-breaking backends and export the
+				result as a real vector PDF. The print/PDF APIs are documented
+				in the README under “Print &amp; PDF export”.</p>
+				<span class="tag">Print &amp; PDF</span>
+			</div>
+		</a>
+	</section>
+
+	<p class="note">Full Project Gutenberg texts (public domain). Running
+	headers show the current chapter via <code>string-set</code>; footers
+	carry page numbers. Each book page offers a one-click PDF download.</p>
+</main>
+
+<footer class="site-footer">
+	<div>
+		<span><a href="https://github.com/fiduswriter/paged-with-floats">Repository and README</a></span>
+		<span><a href="https://github.com/fiduswriter/paged-with-floats/tree/main/specs">Specs</a></span>
+	</div>
+</footer>
+</body>
+</html>

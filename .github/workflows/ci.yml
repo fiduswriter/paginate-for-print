@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - "main"
+
+jobs:
+  test:
+    name: Lint, unit tests and DOM specs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build library
+        run: pnpm run pretest
+
+      - name: Resolve Playwright version
+        id: playwright
+        run: >
+          echo "version=$(node -p "require('./package.json').devDependencies['playwright-core']")"
+          >> "$GITHUB_OUTPUT"
+
+      - name: Install Chromium for DOM specs
+        run: pnpm dlx playwright@${{ steps.playwright.outputs.version }} install chromium --with-deps
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Unit tests
+        run: pnpm jest
+
+      - name: DOM specs
+        run: pnpm run specs-dom
+
+  render-specs:
+    name: PDF render-baseline specs (main only)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build docker image
+        run: docker build -t paged-with-floats .
+
+      - name: Run render specs
+        run: docker run --rm --ipc=host paged-with-floats npm run specs

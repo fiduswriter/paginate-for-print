@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<title>leader spec</title>
+	<script src="../../../dist/paged.polyfill.js"></script>
+	<style>
+		:root {
+			font-size: 18px;
+		}
+
+		* {
+			font-family: Times New Roman, sans-serif;
+		}
+
+		@page {
+			size: 140mm 200mm;
+			margin: 20mm;
+		}
+
+		.toc {
+			list-style: none;
+			padding: 0;
+		}
+
+		.toc li {
+			margin-bottom: 0.5em;
+		}
+
+		.toc a {
+			text-decoration: none;
+			color: inherit;
+		}
+
+		.toc a::after {
+			content: leader('.') target-counter(attr(href url), page);
+		}
+	</style>
+</head>
+
+<body>
+	<h1 id="chap1">Chapter 1</h1>
+	<p>
+		Lorem ipsum dolor sit amet, consectetur adipiscing elit. Morbi non suscipit odio. Aenean ut ligula id mauris efficitur tincidunt vitae non leo.
+	</p>
+	<ul class="toc">
+		<li><a href="#chap1">Chapter 1</a></li>
+	</ul>
+</body>
+
+</html>

@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8" />
+	<title>Page floats stacking order</title>
+	<script src="../../../dist/paged.polyfill.js"></script>
+	<style>
+@page {
+	size: 200mm 300mm;
+	margin: 20mm;
+}
+
+p {
+	margin: 0;
+	font-size: 14px;
+	line-height: 16px;
+}
+
+figure {
+	margin: 0;
+	background: #ddd;
+}
+
+.ftop {
+	float-reference: page;
+	float: top;
+}
+
+.fbottom {
+	float-reference: page;
+	float: bottom;
+}
+
+#top-a { height: 20mm; }
+#top-b { height: 25mm; }
+#bot-c { height: 22mm; }
+	</style>
+</head>
+
+<body>
+
+<figure class="ftop" id="top-a"><figcaption>A</figcaption></figure>
+<p>One.</p>
+<figure class="ftop" id="top-b"><figcaption>B</figcaption></figure>
+<figure class="fbottom" id="bot-c"><figcaption>C</figcaption></figure>
+<p>Two.</p>
+
+</body>
+
+</html>

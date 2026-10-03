@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<title>The Malay Archipelago — floats in multicol (editable demo)</title>
+<style>
+/* Demo chrome */
+html, body { margin: 0; height: 100%; }
+body {
+	display: flex;
+	flex-direction: column;
+	font-family: system-ui, sans-serif;
+	background: #fafafa;
+}
+#toolbar {
+	padding: 8px 12px;
+	background: #22252a;
+	color: #eee;
+	display: flex;
+	gap: 10px;
+	align-items: center;
+	flex: none;
+}
+#toolbar button {
+	padding: 7px 14px; border: 0; border-radius: 6px;
+	background: #4a90d9; color: white; cursor: pointer; font-size: 14px;
+}
+#toolbar button:disabled { background: #777; cursor: wait; }
+#toolbar button.secondary { background: #666; }
+#status { font-size: 13px; color: #bbb; margin-left: auto; }
+#main { flex: 1; display: flex; min-height: 0; }
+#editor-pane {
+	width: 38%; min-width: 320px; display: flex; flex-direction: column;
+	border-right: 1px solid #ccc; background: white;
+}
+#editor-label {
+	padding: 6px 10px; font-size: 12px; color: #555;
+	background: #ececec; border-bottom: 1px solid #ddd; flex: none;
+}
+#source {
+	flex: 1; border: 0; resize: none; padding: 10px;
+	font-family: ui-monospace, Menlo, Consolas, monospace;
+	font-size: 11.5px; line-height: 1.45; outline: none; white-space: pre;
+}
+#output-pane { flex: 1; overflow: auto; padding: 16px; background: #525659; }
+.paged_pages { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.paged_page { background: white; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+
+</style>
+<script src="demo-ui.js"></script>
+<script>
+window.PagedConfig = { auto: false };
+</script>
+<script src="../dist/paged.polyfill.js"></script>
+</head>
+<body>
+<div id="toolbar">
+	<button id="render-btn">Render pages</button>
+	<button id="pdf-btn" class="secondary">Download PDF</button>
+	<span id="status">Edit the source on the left, then render.</span>
+</div>
+<div id="main">
+	<div id="editor-pane">
+		<div id="editor-label">HTML source (editable — CSS included)</div>
+		<textarea id="source" spellcheck="false"></textarea>
+	</div>
+	<div id="output-pane"><div id="output"></div></div>
+</div>
+
+<script id="demo-default-source" type="text/plain"><!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<title>The Malay Archipelago — floats in multicol</title>
+	<style>
+		/* Book CSS. Its root-level `body { column-count }` is captured by
+		   the polisher and realized as the page wrappers' columns; the
+		   host document itself must never become a multicol container. */
+		body {
+			column-count: 2;
+			column-gap: 10mm;
+			font-family: serif;
+		}
+
+		@page {
+			size: 190mm 250mm;
+			margin: 20mm;
+
+			@top-center {
+				content: string(chapter);
+				font-size: 0.8em;
+				font-style: italic;
+			}
+			@bottom-center {
+				content: counter(page);
+				font-size: 0.8em;
+			}
+		}
+
+		h2 {
+			string-set: chapter content();
+			margin-top: 0;
+			break-after: avoid;
+		}
+
+		h3 {
+			font-variant: small-caps;
+			letter-spacing: 0.05em;
+			margin-top: 0;
+			break-after: avoid;
+		}
+
+		.source-note {
+			font-size: 0.85em;
+			color: #555;
+			border-top: 0.5pt solid #999;
+			padding-top: 6pt;
+			margin-top: 10pt;
+		}
+
+		/* … with page floats: figures are pulled to the top of the page
+		   their anchor appears on, spanning the full page width across
+		   both columns, while column text continues beneath them. */
+		figure.topfloat {
+			float-reference: page;
+			float: top;
+			float-min-wrap-block: 40mm;
+			margin: 0 0 10px 0;
+			text-align: center;
+		}
+		figcaption {
+			font-size: 0.85em;
+			font-style: italic;
+			margin-top: 6px;
+		}
+
+		/* Footnotes collect at the bottom of the page, below all columns. */
+		.footnote {
+			float: footnote;
+			font-size: 0.8em;
+		}
+		::footnote-call {
+			font-size: 0.7em;
+			vertical-align: super;
+		}
+		::footnote-marker {
+			font-weight: bold;
+		}
+
+		p {
+			text-align: justify;
+			hyphens: auto;
+		}
+	</style>
+
+</head>
+<body>
+<span class="topfloat figure-wrap"><figure class="topfloat">
+	<img src="assets/images/map-of-malay-archipelago-wallace-1869.jpg" alt="Wallace's map" style="max-width: 100%;">
+	<figcaption>Fold-out coloured map at front of book, showing Wallace's travels around the archipelago.</figcaption>
+</figure></span>
+
+<h1>The Malay Archipelago</h1>
+
+<p><i><b>The Malay Archipelago</b></i> is a book by the British naturalist <i>Alfred Russel Wallace</i> that chronicles his scientific exploration, during the eight-year period 1854 to 1862, of the southern portion of the <i>Malay Archipelago</i> including <i>Malaysia</i>, <i>Singapore</i>, the islands of <i>Indonesia</i>, then known as the <i>Dutch East Indies</i>, and the island of <i>New Guinea</i>. It was published in two volumes in 1869, delayed by Wallace's ill health and the work needed to describe the many specimens he brought home.<span class="footnote"><span>Wallace, 1869. pp. vii–ix.</span></span> The book went through ten editions in the nineteenth century; it has been reprinted many times since, and has been translated into at least eight languages.</p>
+
+<h2>Context</h2>
+
+<p>In 1847, Wallace and his friend <i>Henry Walter Bates</i>, both in their early twenties,<span class="footnote"><span>Bates was 22, Wallace was 24.</span></span> agreed that they would jointly make a collecting trip to the Amazon "towards solving the problem of origin of species";<span class="footnote"><span>Mallet, Jim. "Henry Walter Bates". University College London. Retrieved December 11, 2012.</span></span> <i>Charles Darwin</i>'s book on the <i>Origin of Species</i> was not published until 11 years later, in 1859, itself precipitated by a famous letter from Wallace which described the theory of natural selection in outline. They had been inspired by reading the American <i>entomologist</i> <i>William Henry Edwards</i>'s pioneering 1847 book <i>A Voyage Up the River Amazon</i>.<span class="footnote"><span>Edwards, 1847.</span></span> Bates stayed in the Amazons for 11 years, going on to write <i>The Naturalist on the River Amazons</i> (1863); Wallace, ill with fever, went home in 1852 with thousands of specimens, some for science and some for sale. The ship and his collection were destroyed by fire at sea near the Guianas. Rather than giving up, Wallace wrote about the Amazon in both prose and poetry, and then set sail again, this time for the Malay Archipelago.<span class="footnote"><span>Edwards, 1847.</span></span></p>
+
+<h2>Publication</h2>
+
+<p><i>The Malay Archipelago</i> was first published in 1869 in two volumes by Macmillan (London), and the same year in one volume by Harper &amp; Brothers (New York). Wallace returned to England in 1862, but explains in the Preface that given the large quantity of specimens and his poor health after his stay in the tropics, it took a long time. He noted that he could at once have printed his notes and journals, but felt that doing that would have been disappointing and unhelpful. Instead, therefore, he waited until he had published papers on his discoveries, and other scientists had described and named as new species some 2,000 of his beetles (<i>Coleoptera</i>), and over 900 <i>Hymenoptera</i> including 200 new species of <i>ant</i>.<span class="footnote"><span>Wallace, 1869. pp. vii–ix.</span></span> The book went through 10 editions, with the last published in 1890.</p>
+
+<h2>Illustrations</h2>
+
+<span class="topfloat figure-wrap"><figure class="topfloat">
+	<img src="assets/images/malay-archipelago-great-shielded-grasshopper.jpg" alt="Great-shielded Grasshopper" style="max-width: 70%;">
+	<figcaption>"Great-shielded Grasshopper" drawn and signed by <i>E. W. Robinson</i>.</figcaption>
+</figure></span>
+
+<p>The illustrations are, according to the <i>Preface</i>, made from Wallace's own sketches, photographs, or specimens. Wallace thanks Walter and Henry Woodbury for some photographs of scenery and native people. He acknowledges William Wilson Saunders and Mr Pascoe for horned flies and very rare Longhorn beetles: all the rest were from his own enormous collection.</p>
+
+<h2>Overview</h2>
+
+<p>The preface summarizes Wallace's travels, the thousands of specimens he collected, and some of the results from their analysis after his return to <i>England</i>. In the preface he notes that he travelled over 14,000 miles and collected 125,660 specimens, mostly of <i>insects</i>: 83,200 <i>beetles</i>, 13,100 <i>butterflies and moths</i>, 13,400 other insects. He also returned to England 7,500 "shells" (such as <i>molluscs</i>), 8,050 <i>birds</i>, 310 <i>mammals</i> and 100 <i>reptiles</i>.<span class="footnote"><span>Wallace, 1869. p. xiv.</span></span></p>
+
+<p>The book is dedicated to <i>Charles Darwin</i>, but as Wallace explains in the preface, he has chosen to avoid discussing the <i>evolutionary</i> implications of his discoveries. Instead he confines himself to the "interesting facts of the problem, whose solution is to be found in the principles developed by Mr. Darwin", so from a scientific point of view, the book is largely a descriptive <i>natural history</i>. This modesty belies the fact that while in <i>Sarawak</i> in 1855 Wallace wrote the paper <i>On the Law which has Regulated the Introduction of New Species</i>, concluding with the evolutionary "Sarawak Law", three years before he fatefully wrote to Darwin proposing the concept of <i>natural selection</i>.<span class="footnote"><span>Wallace, Alfred Russel (1855). "On the Law Which has Regulated the Introduction of New Species".</span></span></p>
+
+<p>The first chapter describes the <i>physical geography</i> and <i>geology</i> of the islands with particular attention to the role of <i>volcanoes</i> and earthquakes. It also discusses the overall pattern of the flora and fauna including the fact that the islands can be divided, by what would eventually become known as the <i>Wallace line</i>, into two parts, those whose animals are more closely related to those of Asia and those whose fauna is closer to that of Australia.</p>
+
+<p>The following chapters describe in detail the places Wallace visited. Wallace includes numerous observations on the people, their languages, ways of living, and social organization, as well as on the plants and animals found in each location. He talks about the <i>biogeographic</i> patterns he observes and their implications for <i>natural history</i>, in terms both of the movement of species<span class="footnote"><span>Implying <i>adaptive radiation</i>.</span></span> and of the geologic history of the region. He also narrates some of his personal experiences during his travels. The final chapter is an overview of the ethnic, linguistic, and cultural divisions among the people who live in the region and speculation about what such divisions might indicate about their history.</p>
+
+<h2>Contents</h2>
+
+<p>The two volumes describe the islands in five groups, each closing with a summary of the natural history of the group. The deep water that separates <i>Borneo</i> from <i>Sulawesi</i> (Celebes) forms what became known as the <i>Wallace line</i>.</p>
+
+<span class="topfloat figure-wrap"><figure class="topfloat">
+	<img src="assets/images/malay-archipelago-beetles.jpg" alt="Remarkable beetles found at Simunjon, Borneo" style="max-width: 85%;">
+	<figcaption>"Remarkable Beetles Found at Simunjon, Borneo", drawn by <i>E. W. Robinson</i>. Wallace collected about 24 new species of beetle each day at the Simunjon coal-works.</figcaption>
+</figure></span>
+
+<h3>Volume I</h3>
+
+<p><b>Indo-Malay Islands.</b> <i>Singapore</i>, where in one square mile of forest Wallace found 700 species of beetles; <i>Malacca</i> and Mount Ophir, with pitcher plants and giant ferns; <i>Borneo</i> — The Orang-Utan, where the Simunjon coal-works paid workers a little for the insects they found, and where Wallace collected 2,000 species of beetle; a journey into the interior, staying in the circular head-house of a <i>Dyak</i> village and praising the durian as "the king of fruits"; the <i>Dyaks</i>; <i>Java</i>, whose population grew from 3.5 million in 1800 to 14 million in 1865; <i>Sumatra</i>, with the camouflage of the dead-leaf butterfly; and a sketch of the natural history of the islands west of the Wallace line, whose fauna resembles that of India.</p>
+
+<p><b>The Timor Group.</b> <i>Bali</i> and <i>Lombock</i>, where Hindu customs survived while Australian birds such as cockatoos appeared; Lombock's manners, customs and gun-boring; the rajah's census taken with needles and sacred krisses; <i>Timor</i>, with its fan-palms and Australian <i>Eucalyptus</i>; and the natural history of a group whose birds are intermediate between those of Java and Australia.</p>
+
+<p><b>The Celebes Group.</b> <i>Macassar</i>, where a farm granted Wallace "one of my greatest luxuries" — a glass of milk every day; birdwing butterflies, "the largest, the most perfect, and the most beautiful of butterflies"; <i>Menado</i>, in the mountains by the coffee plantations; and the natural history of a group whose birds are quite isolated, related to those of New Guinea, Australia, India and Africa.</p>
+
+<p><b>The Moluccas.</b> <i>Banda</i>, with its smoking volcano and nutmeg trees; and <i>Amboyna</i>, whose harbour held "a continuous series of corals, sponges, actiniæ, and other marine productions, of magnificent dimensions, varied forms, and brilliant colours".</p>
+
+<h3>Volume II</h3>
+
+<p><b>The Moluccas, continued.</b> <i>Ternate</i>, where Wallace kept a house for three years and wrote the famous essay on natural selection; <i>Gilolo</i>; the voyage to the <i>Kaióa</i> Islands and <i>Batchian</i>, past the comet of October 1858; Batchian itself, where his servant Ali shot the first known specimen of <i>Wallace's standardwing</i>, "a great prize"; <i>Ceram</i>, <i>Goram</i> and the <i>Matabello</i> Islands, with sago-making and prau-building; <i>Bouru</i>; and the natural history of the Moluccas, whose 265 bird species exceed those of all Europe.</p>
+
+<p><b>The Papuan Group.</b> Macassar to the <i>Aru</i> Islands in a native prau; the Aru Islands, their birds of paradise and pearl-shell fisheries; and <i>New Guinea</i>, with the birds of paradise described in detail.</p>
+
+<p><b>Appendix.</b> The final chapters give an overview of the ethnic, linguistic and cultural divisions of the archipelago's peoples, and tables of the mammalian and avian fauna of each group, concluding with Wallace's revision of the boundaries of the regions he had crossed.</p>
+
+<span class="topfloat figure-wrap"><figure class="topfloat">
+	<img src="assets/images/malay-archipelago-standardwing.jpg" alt="Wallace's standardwing" style="max-width: 55%;">
+	<figcaption>Male and female of <i>Wallace's standardwing</i>, drawn on wood by <i>John Gerrard Keulemans</i>. The bird was shot by Wallace's servant Ali at Batchian.</figcaption>
+</figure></span>
+
+<h2>Reception</h2>
+
+<p><i>The Malay Archipelago</i> attracted many reviews, with interest from scientific, geographic, church and general periodicals. Reviewers noted and sometimes disagreed with various aspects of his theories, especially the division of <i>fauna</i> and <i>flora</i> along what soon became known as the <i>Wallace line</i>, <i>natural selection</i> and <i>uniformitarianism</i>. Nearly all agreed that he had provided an interesting and comprehensive account of the geography, natural history, and peoples of the archipelago, about which little was known to readers at the time, in addition to the extensive breadth of specimens collected.<span class="footnote"><span>Smith, Charles H. "The Malay Archipelago". The Wallace Page.</span></span></p>
+
+<p>In <i>The Anthropological Review</i>, the reviewer — most likely the president of the Anthropological Society, Sir James Hunt — took issue with Wallace's remarks on the methods of the anthropological societies, but praised the book, writing that Wallace "combines the research of the man of science with the practical attainments of the traveller". <i>The Popular Science Review</i> admired the use of language, saying the book is "instructive, and, at the same time, attractive". <i>The Ladies' Repository</i> attributed the success of the book to its "simplicity and ingenuousness", its "graphic descriptions", and its "spice of adventures and dangers superinduced by the wild beasts and savage tribes", recommending it as "one of the most entertaining works of travel and adventure that has recently fallen into our hands".</p>
+
+<p>The book is much cited, and is Wallace's most successful, both commercially and as a piece of literature. It was said to be one of <i>Charles Darwin</i>'s favourite books, and he arranged for several of the illustrations to be shown to students at Down House.<span class="footnote"><span>Smith, Charles H. "The Malay Archipelago". The Wallace Page.</span></span></p>
+
+<h2>Influence on other works</h2>
+
+<p>Wallace is recognized as the pre-eminent collector and field biologist of giant <i>bird of paradise</i> (Paradisaeidae), and <i>The Malay Archipelago</i> is an important reference work, cited alongside the reports of the French explorer <i>René Primevère Lesson</i> as the principal sources for the natural history of these birds. The book also inspired the young <i>Douglas Mawson</i>, and Joseph Conrad's tale <i>Freya of the Seven Isles</i> was partly inspired by its account of the <i>Banda</i> Islands.</p>
+
+<p class="source-note">The text of this demo is condensed from the Wikipedia article <i>The Malay Archipelago</i> (en.wikipedia.org), and the illustrations are public-domain engravings from the book's 1869 first edition, taken from Wikimedia Commons.</p>
+</body>
+</html>
+</script>
+<script>
+(function () {
+	const template = document.getElementById("demo-default-source");
+	const source = document.getElementById("source");
+	source.value = template.textContent.trim() + "\n";
+
+	function setStatus(text) {
+		document.getElementById("status").textContent = text;
+	}
+
+	async function currentSource() {
+		return source.value.replace(DemoUI.POLYFILL_TAG_RE, "");
+	}
+
+	async function renderPages() {
+		const button = document.getElementById("render-btn");
+		button.disabled = true;
+		setStatus("Rendering…");
+		const output = document.getElementById("output");
+		output.innerHTML = "";
+		try {
+			const previewer = new window.Paged.Previewer();
+			// Parse to a fragment: the chunker needs DOM input, and
+			// <style> elements inside the fragment still apply.
+			const template = document.createElement("template");
+			template.innerHTML = await currentSource();
+			const flow = await previewer.preview(template.content, [], output);
+			await previewer.hooks.afterPreview.trigger(flow.pages);
+			setStatus(flow.total + " pages rendered in " +
+				Math.round(flow.performance) + " ms" +
+				(flow.overflowViolations && flow.overflowViolations.length
+					? " — " + flow.overflowViolations.length + " overflow violation(s)!"
+					: ""));
+		} catch (error) {
+			setStatus("Rendering failed: " + error.message);
+			console.error(error);
+		} finally {
+			button.disabled = false;
+		}
+	}
+
+	async function downloadPdf() {
+		const button = document.getElementById("pdf-btn");
+		button.disabled = true;
+		const original = button.textContent;
+		button.textContent = "Generating PDF…";
+		setStatus("Generating PDF…");
+		try {
+			const bytes = await DemoUI.generatePdf(
+				await currentSource(),
+				{ title: "The Malay Archipelago — floats in multicol" },
+			);
+			DemoUI.saveBytes(bytes, "malay-archipelago.pdf");
+			setStatus("PDF downloaded (" + Math.round(bytes.length / 1024) + " KB)");
+		} catch (error) {
+			setStatus("PDF generation failed: " + error.message);
+			console.error(error);
+		} finally {
+			button.disabled = false;
+			button.textContent = original;
+		}
+	}
+
+	document.getElementById("render-btn").addEventListener("click", () => {
+		renderPages().catch((e) => setStatus(String(e)));
+	});
+	document.getElementById("pdf-btn").addEventListener("click", () => {
+		downloadPdf().catch((e) => setStatus(String(e)));
+	});
+
+	// Render once on load so the right side is never empty.
+	window.addEventListener("DOMContentLoaded", () => {
+		renderPages().catch((e) => setStatus(String(e)));
+	});
+})();
+</script>
+</body>
+</html>

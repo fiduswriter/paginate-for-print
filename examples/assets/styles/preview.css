@@ -1,0 +1,74 @@
+:root {
+  --color-mbox : rgba(0,0,0,0.2);
+  --margin: 4px;
+}
+
+[contenteditable]:focus {
+    outline: 0px solid transparent;
+}
+
+#controls {
+  display: none;
+}
+
+@media screen {
+
+  body {
+    background-color: whitesmoke;
+  }
+
+  .paged_page {
+    background-color: #fdfdfd;
+    margin: calc(var(--margin) * 4) var(--margin);
+    flex: none;
+    box-shadow: 0 0 0 1px var(--color-mbox);
+  }
+
+  .paged_pages {
+    width: calc((var(--paged-width) * 2) + (var(--margin) * 4));
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    transform-origin: 0 0;
+    margin: 0 auto;
+  }
+
+  #controls {
+    margin: 20px 0;
+    text-align: center;
+    display: block;
+  }
+
+  .paged_first_page {
+    margin-left: calc(50% + var(--margin));
+  }
+}
+
+@media screen {
+  .debug .paged_margin-top .paged_margin-top-left-corner,
+  .debug .paged_margin-top .paged_margin-top-right-corner {
+    box-shadow: 0 0 0 1px inset var(--color-mbox);
+  }
+
+  .debug .paged_margin-top > div {
+    box-shadow: 0 0 0 1px inset var(--color-mbox);
+  }
+
+  .debug .paged_margin-right > div {
+    box-shadow: 0 0 0 1px inset var(--color-mbox);
+  }
+
+  .debug .paged_margin-bottom .paged_margin-bottom-left-corner,
+  .debug .paged_margin-bottom .paged_margin-bottom-right-corner {
+    box-shadow: 0 0 0 1px inset var(--color-mbox);
+  }
+
+  .debug .paged_margin-bottom > div {
+    box-shadow: 0 0 0 1px inset var(--color-mbox);
+  }
+
+  .debug .paged_margin-left > div {
+    box-shadow: 0 0 0 1px inset var(--color-mbox);
+  }
+}

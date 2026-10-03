@@ -1,2 +1,11 @@
-node_modules/
-dist/
+.DS_Store
+node_modules
+dist
+lib
+__diff_output__
+specs/**/*.pdf
+specs/temp
+.vscode
+docs/
+site/
+.kilo/

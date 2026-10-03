@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<title>target-counter with url()</title>
+	<script src="../../../dist/paged.polyfill.js"></script>
+	<style>
+		:root {
+			font-size: 18px;
+		}
+
+		@page {
+			size: 6in 8in;
+			margin: 20mm;
+		}
+
+		section {
+			break-before: page;
+		}
+
+		a {
+			text-decoration: none;
+			color: currentColor;
+		}
+
+		#ref-call::after {
+			color: red;
+			content: " (See p. " target-counter(url(#chap1), page) ")";
+		}
+	</style>
+</head>
+
+<body>
+	<section>
+		<p>Cross reference: <a href="#chap1" id="ref-call"></a></p>
+	</section>
+
+	<section>
+		<h1 id="chap1">Chapter 1</h1>
+		<p>
+			Lorem ipsum dolor sit amet, consectetur adipiscing elit. Morbi non suscipit odio. Aenean ut ligula id mauris efficitur tincidunt vitae non leo.
+		</p>
+	</section>
+</body>
+
+</html>

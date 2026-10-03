@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="utf-8" />
+	<title>Page floats with forced break</title>
+	<script src="../../../dist/paged.polyfill.js"></script>
+	<style>
+@page {
+	size: 200mm 300mm;
+	margin: 20mm;
+}
+
+p {
+	margin: 0;
+	font-size: 14px;
+	line-height: 16px;
+}
+
+figure {
+	margin: 0;
+	background: #ddd;
+}
+
+figure.float {
+	float-reference: page;
+	float: top;
+	height: 30mm;
+}
+
+h1.chapter {
+	break-before: page;
+}
+	</style>
+</head>
+
+<body>
+
+<figure class="float" id="fb"><figcaption>Float before break</figcaption></figure>
+<p id="anchor">Anchor paragraph on page one.</p>
+<h1 class="chapter">Chapter heading</h1>
+<p>Chapter body text.</p>
+
+</body>
+
+</html>

@@ -1,0 +1,21 @@
+Liberation Fonts (SIL Open Font License 1.1)
+============================================
+
+Bundled as *metric-compatible* fallbacks for the PDF emitter: when a
+document requests a family that has no matching `@font-face` rule (most
+commonly "Times New Roman", "Arial" or "Courier New"), the emitter embeds
+the Liberation family with identical advance widths so word positions
+measured in the browser line up in the emitted PDF.
+
+Mapping (see src/pdf/pdf-emitter.ts, METRIC_COMPATIBLE_FAMILIES):
+- Times New Roman / Times / Liberation Serif -> LiberationSerif-*.ttf
+- Arial / Helvetica / Liberation Sans        -> LiberationSans-*.ttf
+- Courier New / Courier / Liberation Mono    -> LiberationMono-*.ttf
+
+Copyright (c) 2012-2025 The LibreOffice contributors (upstream:
+https://github.com/liberationfonts). Licensed under the SIL Open Font
+License, Version 1.1 — the same license text shipped in OFL.txt applies;
+the full license is also available at https://openfontlicense.org.
+
+The fonts are bundled from the Debian `fonts-liberation` package
+(version 2.x series).

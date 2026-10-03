@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<style>
+		body {
+			column-count: 2;
+			column-gap: 10mm;
+		}
+		@page {
+			size: 140mm 200mm;
+			margin: 20mm;
+		}
+		p {
+			line-height: 22px;
+		}
+		.avoid {
+			break-inside: avoid;
+			border: 1px solid black;
+		}
+	</style>
+	<script src="../../../dist/paged.polyfill.js"></script>
+</head>
+<body>
+	<p>Filler text before the avoid block so that the block lands near a column boundary on the first page of the flow here.</p>
+	<div class="avoid" id="keep-together">
+		<p>First paragraph of the block that must not be split internally by the column fragmentation process at all.</p>
+		<p>Second paragraph of the unbreakable block which should move as one unit to the next available column.</p>
+	</div>
+	<p>Trailing text after the avoided block continues the normal flow of columns and pages after it in order.</p>
+</body>
+</html>

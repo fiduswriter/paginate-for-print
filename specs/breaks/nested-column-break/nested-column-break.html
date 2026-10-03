@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<style>
+		body {
+			column-count: 2;
+			column-gap: 12mm;
+		}
+		@page {
+			size: 140mm 200mm;
+			margin: 20mm;
+		}
+		p {
+			line-height: 22px;
+		}
+		.box {
+			border: 1px solid black;
+			padding: 4mm;
+		}
+		.break-before-column {
+			break-before: column;
+		}
+	</style>
+	<script src="../../../dist/paged.polyfill.js"></script>
+</head>
+<body>
+	<div class="box">
+		<p class="first">First nested paragraph.</p>
+		<p class="break-before-column second">Second nested paragraph should start in column two, still inside the box.</p>
+	</div>
+</body>
+</html>
