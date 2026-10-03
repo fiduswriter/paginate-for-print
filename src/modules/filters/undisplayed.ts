@@ -1,3 +1,28 @@
+/**
+ * Handler that marks elements whose `display` resolves to `none`.
+ *
+ * The module works in two phases. While the Polisher parses the author
+ * stylesheets, every `display` declaration is captured in a map keyed by the
+ * normalized selector text (`onDeclaration`). When the Chunker has parsed the
+ * content into a detached fragment but before any page is built, the captured
+ * rules are resolved against that fragment, the CSS cascade is approximated
+ * per element (importance, then specificity, then stable source order), and
+ * every element whose winning value is `none` — plus every element whose own
+ * inline `style` sets `display: none` — is stamped with
+ * `data-undisplayed="undisplayed"`.
+ *
+ * The module never removes, hides or restyles anything: the author's own
+ * `display: none` rules keep applying at render time (pages live in the same
+ * document). The marker exists purely for the engine's traversal logic, which
+ * skips neighbors carrying a truthy `data-undisplayed`.
+ *
+ * No layout APIs are used anywhere: the content is a detached fragment at
+ * `filter` time, so computed styles are meaningless and the marking depends
+ * only on DOM structure and the captured CSS.
+ *
+ * @class
+ * @extends Handler
+ */
 import Handler from "../handler.js";
 import type { HandlerSource } from "../handler.js";
 import csstree from "css-tree";
@@ -5,6 +30,13 @@ import type { CssNode, List } from "css-tree";
 import { calculateSpecificity } from "clear-cut";
 import { cleanSelector } from "../../utils/css.js";
 
+/**
+ * A captured `display` declaration, keyed by its selector text.
+ *
+ * Typing caveat: `important` is declared `boolean`, but css-tree keeps the
+ * identifier after `!` verbatim, so at runtime it may hold a truthy string
+ * (e.g. `"ie"` for the `!ie` hack). Any truthy value counts as important.
+ */
 interface DisplayRule {
 	value: string;
 	selector: string;
@@ -13,154 +45,182 @@ interface DisplayRule {
 }
 
 /**
- * Handler that identifies and marks elements styled with `display: none` from CSS or inline styles.
+ * Marks elements styled with `display: none` from CSS or inline styles.
  *
- * @class
- * @extends Handler
+ * Subscribes purely by method name: `onDeclaration` is registered on the
+ * Polisher's `onDeclaration` hook, `filter` on the Chunker's `filter` hook.
  */
 class UndisplayedFilter extends Handler {
+	/** Captured `display` declarations, keyed by selector text (last write wins per key). */
 	displayRules: Record<string, DisplayRule>;
 
 	/**
-	 * Creates an instance of UndisplayedFilter.
+	 * Create an UndisplayedFilter instance.
 	 *
-	 * @param {Object} chunker - The chunker managing document flow.
-	 * @param {Object} polisher - The polisher managing post-processing.
-	 * @param {Object} caller - The entity invoking the handler.
+	 * @param {HandlerSource} chunker - The chunker, exposing lifecycle hooks.
+	 * @param {HandlerSource} polisher - The polisher, exposing CSS hooks.
+	 * @param {HandlerSource} caller - The caller (previewer), exposing preview
+	 * hooks.
 	 */
 	constructor(chunker?: HandlerSource, polisher?: HandlerSource, caller?: HandlerSource) {
 		super(chunker, polisher, caller);
-
-		/**
-		 * A map of CSS selectors to display rules (`display: none`, etc).
-		 * @type {Object.<string, Object>}
-		 */
 		this.displayRules = {};
 	}
 
 	/**
-	 * Captures display declarations during CSS parsing.
+	 * Captures one CSS declaration during the Polisher's sheet walk.
 	 *
-	 * @param {Object} declaration - The CSS declaration node.
-	 * @param {Object} dItem - The declaration item in the AST.
-	 * @param {Array} dList - The list of declarations.
-	 * @param {Object} rule - The associated CSS rule.
+	 * Only declarations whose property is exactly the lowercase string
+	 * `display` are captured (css-tree preserves the raw source spelling, so
+	 * `DISPLAY: none` is never captured). The display value is read as the
+	 * name of the first child of the declaration's value children — a
+	 * functional value such as `var(--x)` therefore records `var`, and only
+	 * the lowercase identifier `none` can ever trigger marking later.
+	 *
+	 * The rule's prelude is serialized with css-tree's generator and split on
+	 * commas; each resulting selector piece becomes a key in `displayRules`,
+	 * fully replacing any previous entry for that key (last write wins). The
+	 * Polisher's sheet walk visits declarations inside a nested `@media`/
+	 * `@supports` block twice — once with the inner rule as context and once
+	 * with the at-rule itself, producing a bogus key from the at-rule prelude;
+	 * such keys are harmless (they are recorded like any other and simply
+	 * never match, or are skipped as invalid selectors at query time).
+	 *
+	 * @param {CssNode} declaration - The declaration node being visited.
+	 * @param {List.Cursor} dItem - The declaration's cursor in its list.
+	 * @param {List} dList - The list containing the declaration.
+	 * @param {Object} rule - The rule context; `ruleNode` is the subtree root
+	 * the declaration walk started from (an ordinary Rule, or the at-rule
+	 * itself for the double visit inside nested at-rule blocks).
 	 */
 	onDeclaration(
 		declaration: CssNode,
 		dItem: List.Cursor,
 		dList: List,
 		rule: { ruleNode: CssNode },
-	) {
-		if (declaration.property === "display") {
-			const selector = csstree.generate(rule.ruleNode.prelude);
-			const value = declaration.value.children.first().name;
+	): void {
+		if (declaration.property !== "display") {
+			return;
+		}
 
-			selector.split(",").forEach((s) => {
-				this.displayRules[s] = {
-					value: value,
-					selector: s,
-					specificity: calculateSpecificity(s),
-					important: declaration.important,
-				};
-			});
+		const selector = csstree.generate(rule.ruleNode.prelude);
+		const value = declaration.value?.children?.first()?.name;
+
+		for (const key of selector.split(",")) {
+			this.displayRules[key] = {
+				value,
+				selector: key,
+				specificity: calculateSpecificity(key),
+				important: declaration.important as unknown as boolean,
+			};
 		}
 	}
 
 	/**
-	 * Filters out or marks elements that are not meant to be displayed.
+	 * Chunker-side filter: resolves the captured rules against the parsed
+	 * content fragment and marks the elements whose winning `display` value
+	 * is `none`, then independently marks every element whose inline
+	 * `style.display` is exactly `none`.
 	 *
-	 * @param {HTMLElement | DocumentFragment} content - The DOM content to be filtered.
+	 * Only the `data-undisplayed` attribute is written; nothing is removed,
+	 * hidden or restyled, and no element is ever un-marked.
+	 *
+	 * @param {HTMLElement | DocumentFragment} content - The parsed content
+	 * fragment (detached; `querySelectorAll` is scoped to its descendants).
 	 */
-	filter(content: HTMLElement | DocumentFragment) {
+	filter(content: HTMLElement | DocumentFragment): void {
 		const { matches, selectors } = this.sortDisplayedSelectors(
 			content,
 			this.displayRules,
 		);
 
-		// Process CSS-based display: none
-		for (let i = 0; i < matches.length; i++) {
-			const element = matches[i];
-			const selector = selectors[i];
-			const displayValue = selector[selector.length - 1].value;
-
-			if (this.removable(element) && displayValue === "none") {
+		matches.forEach((element, index) => {
+			const rules = selectors[index];
+			const winning = rules[rules.length - 1];
+			if (winning.value === "none" && this.removable(element)) {
 				element.dataset.undisplayed = "undisplayed";
 			}
-		}
+		});
 
-		// Process inline styles
-		const styledElements = content.querySelectorAll("[style]") as NodeListOf<HTMLElement>;
-		for (let i = 0; i < styledElements.length; i++) {
-			const element = styledElements[i];
-			// Only an explicit inline `display: none` hides the element; any
-			// other style attribute must not mark it undisplayed.
+		content.querySelectorAll<HTMLElement>("[style]").forEach((element) => {
 			if (element.style.display === "none") {
 				element.dataset.undisplayed = "undisplayed";
 			}
-		}
+		});
 	}
 
 	/**
-	 * Sorts display rules based on `!important` and specificity, used for resolving conflicts.
+	 * Comparison predicate sorting a single element's collected rules so that
+	 * the most significant rule ends up LAST: a truthy `important` (string
+	 * included — see the `!ie` hack) outranks everything, then ascending
+	 * specificity; equal rules compare as 0, and `Array.prototype.sort`'s
+	 * stability lets the rule pushed last win such ties. Must not depend on
+	 * `this` (it is used as an unbound comparator reference).
 	 *
-	 * @private
-	 * @param {Object} a - First display rule.
-	 * @param {Object} b - Second display rule.
-	 * @returns {number} Sort order.
+	 * @param {DisplayRule} a - First rule.
+	 * @param {DisplayRule} b - Second rule.
+	 * @returns {number} Positive when `a` sorts after `b`, negative before,
+	 * zero for full ties.
 	 */
 	sorter(a: DisplayRule, b: DisplayRule): number {
 		if (a.important && !b.important) {
 			return 1;
 		}
-
 		if (b.important && !a.important) {
 			return -1;
 		}
-
 		return a.specificity - b.specificity;
 	}
 
 	/**
-	 * Matches display rules against elements and sorts them by specificity and importance.
+	 * Matches the given rules against `content` and buckets them per matched
+	 * element.
 	 *
-	 * @param {HTMLElement | DocumentFragment} content - The DOM content to search.
-	 * @param {Object.<string, Object>} displayRules - CSS display rules to apply.
-	 * @returns {{ matches: HTMLElement[], selectors: Object[][] }} Matched elements and their rules.
+	 * Iterates the rule map in key insertion order. For each rule the
+	 * selector is tried with `content.querySelectorAll`; when that throws
+	 * (invalid selector — at-rule preludes, engine-specific pseudo-elements,
+	 * malformed input), it is retried once with `cleanSelector`, which strips
+	 * the engine's `::footnote-call` / `::footnote-marker` names. If the
+	 * retry also throws, the rule is silently skipped. Only descendants of
+	 * `content` are tested — `content` itself is never matched or marked.
+	 *
+	 * @param {HTMLElement | DocumentFragment} content - The subtree to query.
+	 * @param {Record<string, DisplayRule>} displayRules - Captured rules by
+	 * selector text; defaults to an empty map.
+	 * @returns {Object} `matches` (elements, first-encounter order) and the
+	 * parallel `selectors`: per element, the rules matching it, sorted
+	 * ascending with {@link UndisplayedFilter.sorter} (winner = last).
 	 */
 	sortDisplayedSelectors(
 		content: HTMLElement | DocumentFragment,
 		displayRules: Record<string, DisplayRule> = {},
 	): { matches: HTMLElement[]; selectors: DisplayRule[][] } {
-		let matches: HTMLElement[] = [];
-		let selectors: DisplayRule[][] = [];
+		const matches: HTMLElement[] = [];
+		const selectors: DisplayRule[][] = [];
 
-		for (let d in displayRules) {
-			const displayItem = displayRules[d];
-			const selector = displayItem.selector;
-
-			let query: ArrayLike<Element> = [];
-
+		for (const key in displayRules) {
+			const rule = displayRules[key];
+			let matched: NodeListOf<HTMLElement>;
 			try {
-				try {
-					query = content.querySelectorAll(selector);
-				} catch {
-					query = content.querySelectorAll(cleanSelector(selector)!);
-				}
+				matched = content.querySelectorAll<HTMLElement>(rule.selector);
 			} catch {
-				query = [];
+				try {
+					matched = content.querySelectorAll<HTMLElement>(
+						cleanSelector(rule.selector) as string,
+					);
+				} catch {
+					continue;
+				}
 			}
 
-			const elements = Array.from(query) as HTMLElement[];
-
-			for (let e of elements) {
-				const index = matches.indexOf(e);
-				if (index !== -1) {
-					selectors[index].push(displayItem);
-					selectors[index] = selectors[index].sort(this.sorter);
+			for (const element of Array.from(matched)) {
+				const index = matches.indexOf(element);
+				if (index === -1) {
+					matches.push(element);
+					selectors.push([rule]);
 				} else {
-					matches.push(e);
-					selectors.push([displayItem]);
+					selectors[index].push(rule);
+					selectors[index].sort(this.sorter);
 				}
 			}
 		}
@@ -169,20 +229,22 @@ class UndisplayedFilter extends Handler {
 	}
 
 	/**
-	 * Determines whether an element is removable based on its inline display style.
+	 * Cascade guard for the CSS pass: an element carrying an inline
+	 * `display` other than `none` (or the empty string) must beat any
+	 * stylesheet rule, so it is not removable. Only the element's own inline
+	 * style is consulted; style-less elements and elements with no inline
+	 * `display` (or inline `display: none`) are removable.
 	 *
-	 * @param {HTMLElement} element - The element to check.
-	 * @returns {boolean} True if the element is considered removable.
+	 * @param {HTMLElement} element - The candidate element.
+	 * @returns {boolean} False iff the element has a style object whose
+	 * inline `display` is neither empty nor `none`.
 	 */
 	removable(element: HTMLElement): boolean {
-		if (
-			element.style &&
-			element.style.display !== "" &&
-			element.style.display !== "none"
-		) {
-			return false;
+		if (element.style) {
+			if (element.style.display !== "" && element.style.display !== "none") {
+				return false;
+			}
 		}
-
 		return true;
 	}
 }

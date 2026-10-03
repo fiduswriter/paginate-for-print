@@ -1,8 +1,15 @@
 import Handler, { type HandlerSource } from "../handler.js";
-import { attr, querySelectorEscape, UUID } from "../../utils/utils.js";
+import { UUID, attr, querySelectorEscape } from "../../utils/utils.js";
 import csstree from "css-tree";
 import type { CssNode, List } from "css-tree";
 
+/**
+ * One recorded `target-counter()` / `target-counters()` occurrence: the
+ * parsed target argument, the serialized original value, the requested
+ * counter name (and optional counter style, or plural separator), the
+ * selector piece it was found under and the synthetic name the occurrence
+ * was rewritten into.
+ */
 interface CounterTargetValue {
 	func: string;
 	args: string[];
@@ -17,51 +24,96 @@ interface CounterTargetValue {
 	urlValue?: string;
 }
 
+/**
+ * All recorded occurrences, keyed by the (untrimmed) comma piece of the
+ * containing rule's serialized selector.
+ */
 interface CounterTargetsData {
 	[selector: string]: CounterTargetValue;
 }
 
+/**
+ * Structural mirror of the polisher's rule context, as passed by the Sheet
+ * with every declaration-related hook trigger.
+ */
 interface RuleContext {
 	ruleNode: CssNode;
 	ruleItem?: List.Cursor;
 	rulelist?: List;
 }
 
+/**
+ * Structural mirror of the Sheet's declaration context.
+ */
 interface DeclarationContext {
 	declarationNode: CssNode;
 	dItem?: List.Cursor;
 	dList?: List;
 }
 
+/**
+ * The polisher as this module consumes it: a source of CSS hooks that also
+ * owns the work stylesheet generated rules are inserted into.
+ */
 interface PolisherSource extends HandlerSource {
 	styleSheet: CSSStyleSheet;
 }
 
+/**
+ * The chunker's layout object as this module consumes it: the container of
+ * all pages rendered so far, which lives in the main document.
+ */
 interface ChunkerLayout {
 	pagesArea: ParentNode;
 }
 
 /**
- * Handler for processing CSS `target-counter()` and `target-counters()` functions.
+ * Computed style as this module reads it: dashed property names, so the
+ * `counter-reset` / `counter-increment` values surface under their CSS
+ * spellings.
+ */
+interface ComputedStyles {
+	[property: string]: string;
+}
+
+/**
+ * Handler implementing the CSS GCPM `target-counter()` and
+ * `target-counters()` generated-content functions: cross references
+ * (typically a table of contents) whose generated content shows the page
+ * number or counter values of the element the link points at.
  *
- * Parses CSS rules using these functions, replaces them with CSS counters or
- * custom properties, and dynamically manages values based on page layout.
- *
- * This allows counters to track values of elements targeted via attributes,
- * supporting complex page-based counters in paged media.
+ * Two phases:
+ * 1. `onContent` (polisher) — every `target-counter(...)` / `target-counters(...)`
+ *    function under a `content` declaration is recorded and rewritten in
+ *    place into `counter(target-counter-<uuid>[,<style>])` (singular) or
+ *    `var(--target-counters-<uuid>)` (plural).
+ * 2. `afterPageLayout` (chunker, awaited after each page) — for every
+ *    recorded entry the referencing elements are located in the rendered
+ *    pages, the element each reference points to is resolved, the target's
+ *    page or counter value is computed and a rule binding the synthetic
+ *    name to that value on the referencing element is appended to the
+ *    polisher's stylesheet. References whose target has not been laid out
+ *    yet stay unmarked and are retried on every later page.
  *
  * @extends Handler
  */
 class TargetCounters extends Handler {
+	/** The polisher's work stylesheet generated rules are inserted into. */
 	styleSheet: CSSStyleSheet;
+	/** Recorded occurrences, keyed by selector piece. */
 	counterTargets: CounterTargetsData;
 
 	/**
-	 * Creates an instance of TargetCounters.
+	 * Wires the handler against the engine objects and captures the polisher's
+	 * work stylesheet. Hook registration happens in the base constructor,
+	 * before the field assignments below.
 	 *
-	 * @param {Object} chunker - The chunker instance managing pagination.
-	 * @param {Object} polisher - The polisher instance responsible for CSS injection and post-processing.
-	 * @param {Object} caller - The caller or controller managing this handler.
+	 * @param {HandlerSource} chunker - The chunker, exposing lifecycle hooks.
+	 * @param {PolisherSource} polisher - The polisher, exposing CSS hooks and
+	 * the work stylesheet. Required: its `styleSheet` is dereferenced with a
+	 * non-null assertion, so a missing polisher throws.
+	 * @param {HandlerSource} caller - The caller (previewer), exposing
+	 * preview hooks.
 	 */
 	constructor(
 		chunker?: HandlerSource,
@@ -70,31 +122,32 @@ class TargetCounters extends Handler {
 	) {
 		super(chunker, polisher, caller);
 
-		/**
-		 * Reference to the stylesheet where counter rules will be inserted.
-		 * @type {CSSStyleSheet}
-		 */
 		this.styleSheet = polisher!.styleSheet;
-
-		/**
-		 * Stores parsed target counter definitions keyed by selector.
-		 * @type {Object<string, Object>}
-		 */
 		this.counterTargets = {};
 	}
 
 	/**
-	 * Processes CSS content function nodes to detect and handle `target-counter()`
-	 * and `target-counters()` functions. Replaces the function with a CSS counter()
-	 * or var() call and stores necessary metadata.
+	 * Records `target-counter()` / `target-counters()` functions under
+	 * `content` declarations and rewrites them in place. Dispatch is purely
+	 * on the function name; nested functions (`attr()` inside a target
+	 * argument) and any other name are ignored, which also makes the double
+	 * walk of `@media` rules idempotent: after the first visit the node's
+	 * name is `counter`/`var` and falls through.
 	 *
-	 * @param {Object} funcNode - The CSS function node representing `target-counter()` or `target-counters()`.
-	 * @param {Object} fItem - The current function node item (unused).
-	 * @param {Object} fList - The function list (unused).
-	 * @param {Object} declaration - The CSS declaration node.
-	 * @param {Object} rule - The CSS rule node containing the declaration.
+	 * @param {CssNode} funcNode - The Function node being visited.
+	 * @param {List.Cursor} fItem - The function's cursor (unused).
+	 * @param {List} fList - The list holding the function (unused).
+	 * @param {DeclarationContext} declaration - The containing declaration
+	 * (unused).
+	 * @param {RuleContext} rule - The containing rule (or at-rule) context.
 	 */
-	onContent(funcNode: CssNode, fItem: List.Cursor, fList: List, declaration: DeclarationContext, rule: RuleContext) {
+	onContent(
+		funcNode: CssNode,
+		fItem: List.Cursor,
+		fList: List,
+		declaration: DeclarationContext,
+		rule: RuleContext,
+	): void {
 		if (funcNode.name === "target-counter") {
 			this.handleTargetCounter(funcNode, rule);
 		} else if (funcNode.name === "target-counters") {
@@ -103,58 +156,63 @@ class TargetCounters extends Handler {
 	}
 
 	/**
-	 * Parses a `target-counter()` function and replaces it with a CSS `counter()` call.
+	 * Handles the singular `target-counter(<target>, <counter-name>
+	 * [, <counter-style>])` form: records one entry per comma piece of the
+	 * containing rule's serialized selector (later entries overwrite earlier
+	 * ones under the same key) and rewrites the function node in place into
+	 * `counter(target-counter-<uuid>[,<style>])`. An unsupported target
+	 * argument leaves the node and the record map untouched.
 	 *
-	 * @param {Object} funcNode - The CSS function node.
-	 * @param {Object} rule - The CSS rule node containing the declaration.
+	 * @param {CssNode} funcNode - The `target-counter` Function node.
+	 * @param {RuleContext} rule - The containing rule (or at-rule) context.
 	 */
-	handleTargetCounter(funcNode: CssNode, rule: RuleContext) {
-		// Extract the selector for this rule
-		let selector = csstree.generate(rule.ruleNode.prelude);
-
-		// Parse the target function (attr() or url())
-		let first = funcNode.children.first();
-		let targetInfo = this.parseTarget(first);
-		if (!targetInfo) {
+	handleTargetCounter(funcNode: CssNode, rule: RuleContext): void {
+		const first = funcNode.children.toArray()[0];
+		const target = this.parseTarget(first);
+		if (!target) {
 			return;
 		}
 
-		// Full generated CSS value of the target-counter function
-		let value = csstree.generate(funcNode);
+		const fullSelector = csstree.generate(rule.ruleNode.prelude);
 
-		let counter: string | undefined, style: string | undefined, styleIdentifier: CssNode | undefined;
+		// The original function text, captured before the node is rewritten.
+		const value = csstree.generate(funcNode);
 
-		// Extract counter name and optional style identifier
+		// First and second direct Identifier child: counter name and optional
+		// counter style. The style node is cloned for the rewrite below.
+		let counter: string | undefined;
+		let style: string | undefined;
+		let styleNode: CssNode | undefined;
 		funcNode.children.forEach((child: CssNode) => {
 			if (child.type === "Identifier") {
 				if (!counter) {
 					counter = child.name;
 				} else if (!style) {
-					styleIdentifier = csstree.clone(child);
 					style = child.name;
+					styleNode = child;
 				}
 			}
 		});
 
-		// Generate a unique CSS variable name for this counter
-		let variable = "target-counter-" + UUID();
+		// One fresh synthetic counter name per target-counter() occurrence.
+		const variable = "target-counter-" + UUID();
 
-		// Support multiple selectors by splitting and adding each individually
-		selector.split(",").forEach((s) => {
-			this.counterTargets[s] = {
-				func: targetInfo!.func,
-				args: targetInfo!.args,
+		fullSelector.split(",").forEach((piece: string) => {
+			const record: CounterTargetValue = {
+				func: target.func,
+				args: target.args,
 				value: value,
 				counter: counter,
 				style: style,
-				selector: s,
-				fullSelector: selector,
+				selector: piece,
+				fullSelector: fullSelector,
 				variable: variable,
-				urlValue: targetInfo!.urlValue,
+				urlValue: target.urlValue,
 			};
+			this.counterTargets[piece] = record;
 		});
 
-		// Replace the original target-counter() function with a CSS counter() function
+		// Rewrite in place: content: counter(target-counter-<uuid>[,<style>]).
 		funcNode.name = "counter";
 		funcNode.children = new csstree.List();
 		funcNode.children.appendData({
@@ -162,39 +220,45 @@ class TargetCounters extends Handler {
 			loc: 0,
 			name: variable,
 		});
-
-		// If a style identifier was provided, append it as a second argument
-		if (styleIdentifier) {
+		if (styleNode) {
 			funcNode.children.appendData({
 				type: "Operator",
-				loc: null,
+				loc: 0,
 				value: ",",
 			});
-			funcNode.children.appendData(styleIdentifier);
+			funcNode.children.appendData(csstree.clone(styleNode));
 		}
 	}
 
 	/**
-	 * Parses a `target-counters()` function and replaces it with a CSS `var()` call
-	 * referencing a generated custom property.
+	 * Handles the plural `target-counters(<target>, <counter-name>
+	 * [, <separator>][, <counter-style>])` form: like the singular handler,
+	 * but the separator is taken from the first String/Raw child (defaulting
+	 * to `"."`) regardless of its position among the arguments, and the node
+	 * is rewritten into `var(--target-counters-<uuid>)`.
 	 *
-	 * @param {Object} funcNode - The CSS function node.
-	 * @param {Object} rule - The CSS rule node containing the declaration.
+	 * @param {CssNode} funcNode - The `target-counters` Function node.
+	 * @param {RuleContext} rule - The containing rule (or at-rule) context.
 	 */
-	handleTargetCounters(funcNode: CssNode, rule: RuleContext) {
-		let selector = csstree.generate(rule.ruleNode.prelude);
-
-		let first = funcNode.children.first();
-		let targetInfo = this.parseTarget(first);
-		if (!targetInfo) {
+	handleTargetCounters(funcNode: CssNode, rule: RuleContext): void {
+		const first = funcNode.children.toArray()[0];
+		const target = this.parseTarget(first);
+		if (!target) {
 			return;
 		}
 
-		let counter: string | undefined;
-		let separator = ".";
-		let separatorSet = false;
-		let style: string | undefined;
+		const fullSelector = csstree.generate(rule.ruleNode.prelude);
 
+		// The original function text, captured before the node is rewritten.
+		const value = csstree.generate(funcNode);
+
+		// Arguments are parsed by node type, not position: the first two
+		// Identifier children are counter name and counter style, the first
+		// String or Raw child is the separator.
+		let counter: string | undefined;
+		let style: string | undefined;
+		let separator: string | undefined;
+		let separatorSet = false;
 		funcNode.children.forEach((child: CssNode) => {
 			if (child.type === "Identifier") {
 				if (!counter) {
@@ -202,76 +266,94 @@ class TargetCounters extends Handler {
 				} else if (!style) {
 					style = child.name;
 				}
-			} else if (
-				!separatorSet &&
-				(child.type === "String" || child.type === "Raw")
-			) {
-				separator = String(child.value).replace(/["']/g, "");
-				separatorSet = true;
+			} else if (child.type === "String" || child.type === "Raw") {
+				if (!separatorSet) {
+					separator = String(child.value).replace(/["']/g, "");
+					separatorSet = true;
+				}
 			}
 		});
+		if (!separatorSet) {
+			separator = ".";
+		}
 
-		let variable = "target-counters-" + UUID();
+		// One fresh synthetic custom-property name per target-counters()
+		// occurrence (note the different prefix from the singular form).
+		const variable = "target-counters-" + UUID();
 
-		selector.split(",").forEach((s) => {
-			this.counterTargets[s] = {
-				func: targetInfo!.func,
-				args: targetInfo!.args,
-				value: csstree.generate(funcNode),
+		fullSelector.split(",").forEach((piece: string) => {
+			const record: CounterTargetValue = {
+				func: target.func,
+				args: target.args,
+				value: value,
 				counter: counter,
 				style: style,
-				selector: s,
-				fullSelector: selector,
+				selector: piece,
+				fullSelector: fullSelector,
 				variable: variable,
 				separator: separator,
 				plural: true,
-				urlValue: targetInfo!.urlValue,
+				urlValue: target.urlValue,
 			};
+			this.counterTargets[piece] = record;
 		});
 
-		// Replace target-counters() with var(--target-counters-<uuid>)
+		// Rewrite in place: content: var(--target-counters-<uuid>).
 		funcNode.name = "var";
 		funcNode.children = new csstree.List();
 		funcNode.children.appendData({
 			type: "Identifier",
 			loc: 0,
-			name: `--${variable}`,
+			name: "--" + variable,
 		});
 	}
 
 	/**
-	 * Parses the first argument of `target-counter()` / `target-counters()`,
-	 * which may be `attr()`, `url()`, or a `Url` node.
+	 * Parses the first child of a target function node into the module's
+	 * target shape. Recognized: an `attr()` Function (its direct Identifier
+	 * children become the attribute names to try, in order), a `url()`
+	 * Function and a `Url` node (both yield the URL text with all quote
+	 * characters stripped, fragment `#` kept). Anything else yields null.
+	 * A missing node (empty function) throws on the node access.
 	 *
-	 * @param {Object} first - The first child of the function node.
-	 * @returns {Object|null} Target descriptor, or null when unsupported.
+	 * @param {CssNode} first - The first child of the target function node.
+	 * @returns {object|null} `{ func: "attr", args }`, `{ func: "url", args:
+	 * [], urlValue }`, or null when the shape is unsupported.
 	 */
 	parseTarget(
 		first: CssNode,
 	): { func: string; args: string[]; urlValue?: string } | null {
 		if (first.type === "Function" && first.name === "attr") {
-			let args: string[] = [];
+			const args: string[] = [];
 			first.children.forEach((child: CssNode) => {
 				if (child.type === "Identifier") {
 					args.push(child.name);
 				}
 			});
-			return { func: "attr", args: args };
+			return {
+				func: "attr",
+				args: args,
+			};
 		}
 
 		if (first.type === "Function" && first.name === "url") {
-			let child = first.children.first();
-			let urlValue = child
-				? String(child.value).replace(/["']/g, "")
-				: "";
-			return { func: "url", args: [], urlValue: urlValue };
+			let urlValue = "";
+			const firstChild = first.children.first();
+			if (firstChild) {
+				urlValue = String(firstChild.value).replace(/["']/g, "");
+			}
+			return {
+				func: "url",
+				args: [],
+				urlValue: urlValue,
+			};
 		}
 
 		if (first.type === "Url") {
 			return {
 				func: "url",
 				args: [],
-				urlValue: String(first.value.value).replace(/["']/g, ""),
+				urlValue: first.value.value.replace(/["']/g, ""),
 			};
 		}
 
@@ -279,160 +361,180 @@ class TargetCounters extends Handler {
 	}
 
 	/**
-	 * Called after page layout to update CSS rules for counters targeting elements in the pages.
-	 * Inserts CSS rules dynamically to reset counters on elements matching the target selectors.
+	 * Resolves every recorded entry against the pages rendered so far. Runs
+	 * the entire record map on every page event; idempotence comes from a
+	 * `data-<variable>` marker attribute, so each referencing element is
+	 * processed at most once. For every unmarked matching element, the
+	 * referenced element is resolved (via the reference's attribute value or
+	 * URL fragment), the element is marked, a rule binding the synthetic
+	 * name to the target's value is appended to the polisher's stylesheet
+	 * and a forced reflow flushes the new rule. Unresolvable references are
+	 * left unmarked and retried on the next page event.
 	 *
-	 * @param {DocumentFragment} fragment - The fragment of the current page.
-	 * @param {Object} page - The page object (unused here).
-	 * @param {Object} breakToken - The pagination break token (unused here).
-	 * @param {Object} chunker - The chunker instance containing the pagesArea DOM.
+	 * @param {HTMLElement} fragment - The page root element (unused).
+	 * @param {unknown} page - The page object (unused).
+	 * @param {unknown} breakToken - The break token (unused).
+	 * @param {ChunkerLayout} chunker - The layout object exposing
+	 * `pagesArea`, the container of all rendered pages.
 	 */
-	afterPageLayout(fragment: HTMLElement, page: unknown, breakToken: unknown, chunker: ChunkerLayout) {
-		Object.keys(this.counterTargets).forEach((name) => {
-			let target = this.counterTargets[name];
-			// Split selector by pseudo elements/classes
-			let split = target.selector.split(/::?/g);
-			let query = split[0];
+	afterPageLayout(
+		fragment: HTMLElement,
+		page: unknown,
+		breakToken: unknown,
+		chunker: ChunkerLayout,
+	): void {
+		const pagesArea = chunker.pagesArea;
 
-			// Select elements not yet processed (without the data attribute)
-			let queried = chunker.pagesArea.querySelectorAll(
+		for (const name of Object.keys(this.counterTargets)) {
+			const target = this.counterTargets[name];
+
+			// Split at every single or double colon; split[0] is the element
+			// query, split[1] (when present) becomes the pseudo suffix. The
+			// split cannot distinguish pseudo-classes from pseudo-elements.
+			const split = target.selector.split(/::?/g);
+
+			const query = split[0];
+
+			let pseudo = "";
+			if (split.length > 1) {
+				pseudo = "::" + split[1];
+			}
+
+			// Static list: elements marked during this same pass stay in it,
+			// but the marker keeps later passes away from them.
+			const selected = pagesArea.querySelectorAll(
 				query + ":not([data-" + target.variable + "])",
 			);
 
-			queried.forEach((selected) => {
-				let element: Element | null = null;
+			for (const element of Array.from(selected)) {
+				let referenced: Element | null | undefined;
 
 				if (target.func === "attr") {
-					let val = attr(selected, target.args);
-					element = chunker.pagesArea.querySelector(querySelectorEscape(val));
+					// The attribute value is used as a selector; a leading `#`
+					// survives querySelectorEscape, `undefined` coerces to the
+					// string "undefined" (matching nothing), an empty value
+					// makes querySelector throw.
+					const val = attr(element, target.args);
+					referenced = pagesArea.querySelector(querySelectorEscape(val));
 				} else if (target.func === "url" && target.urlValue) {
-					let fragment = target.urlValue.includes("#")
-						? target.urlValue.split("#").pop()
-						: target.urlValue;
-					if (fragment) {
-						element = chunker.pagesArea.querySelector(
-							"#" + querySelectorEscape(fragment),
+					// The fragment after the last `#` of the URL is the id to
+					// look up; an empty fragment skips the lookup.
+					let fragmentId = target.urlValue;
+					if (fragmentId.includes("#")) {
+						fragmentId = fragmentId.substring(fragmentId.lastIndexOf("#") + 1);
+					}
+					if (fragmentId) {
+						referenced = pagesArea.querySelector(
+							"#" + querySelectorEscape(fragmentId),
 						);
 					}
 				}
 
-				if (!element) {
-					return;
+				if (!referenced) {
+					// Forward reference: retried on the next page event.
+					continue;
 				}
 
-				// Generate a unique selector id for this instance
-				let selector = UUID();
+				const id = UUID();
 
-				// Mark the selected element as processed
-				selected.setAttribute("data-" + target.variable, selector);
-
-				// Handle pseudo elements if present
-				let pseudo = "";
-				if (split.length > 1) {
-					pseudo += "::" + split[1];
-				}
+				// The marker goes on the referencing element, never on the
+				// target; it doubles as the idempotence guard.
+				element.setAttribute("data-" + target.variable, id);
 
 				if (target.plural) {
-					// target-counters(): collect counter values from the target up
-					// through its ancestors and join them with the separator.
-					let values = this.collectCounterValues(
-						element,
-						target.counter,
-					);
+					// Joined counter values, outermost first, as a custom
+					// property. No values: no rule, but still marked.
+					const values = this.collectCounterValues(referenced, target.counter);
 					if (values.length) {
-						let joined = values.join(target.separator || ".");
 						this.styleSheet.insertRule(
-							`[data-${target.variable}="${selector}"]${pseudo} { --${target.variable}: "${joined}"; }`,
+							`[data-${target.variable}="${id}"]${pseudo} { --${target.variable}: "${values.join(target.separator)}"; }`,
 							this.styleSheet.cssRules.length,
 						);
 					}
 				} else if (target.counter === "page") {
-					// Calculate page counter value by checking page resets and increments
-					let pages = chunker.pagesArea.querySelectorAll(".paged_page");
+					// Replay the page-counter bookkeeping from the computed
+					// counter-reset / counter-increment of the page elements,
+					// stopping after the page that contains the target.
 					let pg = 0;
-					for (let i = 0; i < pages.length; i++) {
-						let page = pages[i];
-						let styles = window.getComputedStyle(page) as CSSStyleDeclaration &
-							Record<string, string>;
-						let reset = styles["counter-reset"].replace("page", "").trim();
-						let increment = styles["counter-increment"]
-							.replace("page", "")
-							.trim();
+					const pages = pagesArea.querySelectorAll(".paged_page");
+					for (const pageElement of Array.from(pages)) {
+						const styles = window.getComputedStyle(
+							pageElement,
+						) as unknown as ComputedStyles;
 
+						const reset = styles["counter-reset"].replace("page", "").trim();
 						if (reset !== "none") {
 							pg = parseInt(reset);
 						}
+
+						const increment = styles["counter-increment"].replace("page", "").trim();
 						if (increment !== "none") {
 							pg += parseInt(increment);
 						}
 
-						if (page.contains(element)) {
+						if (pageElement.contains(referenced)) {
 							break;
 						}
 					}
 
-					// Insert CSS rule to reset the custom counter variable on the
-					// targeted element. Counters reset on a pseudo-element are not
-					// visible to counter() on that same pseudo-element, so reset on
-					// the element itself even when the target-counter() is used in
-					// ::after/::before content.
+					// No pseudo suffix: counters reset on a pseudo-element are
+					// not visible to counter() in that pseudo's own content.
 					this.styleSheet.insertRule(
-						`[data-${target.variable}="${selector}"] { counter-reset: ${target.variable} ${pg}; }`,
+						`[data-${target.variable}="${id}"] { counter-reset: ${target.variable} ${pg}; }`,
 						this.styleSheet.cssRules.length,
 					);
 				} else {
-					// For other counters, get the value from a data attribute and set it
-					let value = element.getAttribute(
-						`data-counter-${target.counter}-value`,
+					// Pre-computed running value written by the Counters module.
+					const val = referenced.getAttribute(
+						"data-counter-" + target.counter + "-value",
 					);
-					if (value) {
+					if (val) {
 						this.styleSheet.insertRule(
-							`[data-${target.variable}="${selector}"] { counter-reset: ${target.variable} ${target.variable} ${parseInt(value)}; }`,
+							`[data-${target.variable}="${id}"] { counter-reset: ${target.variable} ${target.variable} ${parseInt(val)}; }`,
 							this.styleSheet.cssRules.length,
 						);
 					}
 				}
 
-				// Force browser redraw by toggling display style
-				let el = document.querySelector(
-					`[data-${target.variable}="${selector}"]`,
-				) as HTMLElement | null;
-				if (el) {
-					el.style.display = "none";
-					el.clientHeight; // trigger reflow
-					el.style.removeProperty("display");
+				// Force a synchronous style/layout flush so the just-inserted
+				// rule takes effect before the next page is laid out.
+				const marked = document.querySelector(
+					`[data-${target.variable}="${id}"]`,
+				);
+				if (marked) {
+					marked.style.display = "none";
+					marked.clientHeight;
+					marked.style.removeProperty("display");
 				}
-			});
-		});
+			}
+		}
 	}
 
 	/**
-	 * Collects counter values for `target-counters()` by walking from the
-	 * target element up through its ancestors. Values are gathered for every
-	 * element that carries a `data-counter-<name>-value` attribute, then
-	 * reversed so the outermost value comes first.
+	 * Collects the `data-counter-<counter>-value` attributes of `element`
+	 * and every ancestor up to the document root — the walk does not stop at
+	 * page boundaries. Elements with the attribute absent or present but
+	 * empty contribute nothing. Returns the values outermost ancestor first,
+	 * `element`'s own value last.
 	 *
-	 * @param {Element} element - The targeted element.
-	 * @param {string} [counter] - The counter name.
-	 * @returns {string[]} Ordered counter values, outermost first.
+	 * @param {Element} element - The element to start the walk at.
+	 * @param {string} [counter] - The counter name. Falsy: no walk.
+	 * @returns {string[]} The collected values, outermost first.
 	 */
 	collectCounterValues(element: Element, counter?: string): string[] {
 		if (!counter) {
 			return [];
 		}
 
-		let values: string[] = [];
-		let attrName = `data-counter-${counter}-value`;
+		const values: string[] = [];
 		let current: Element | null = element;
-
 		while (current) {
-			let value = current.getAttribute(attrName);
+			const value = current.getAttribute("data-counter-" + counter + "-value");
 			if (value) {
 				values.push(value);
 			}
 			current = current.parentElement;
 		}
-
 		return values.reverse();
 	}
 }

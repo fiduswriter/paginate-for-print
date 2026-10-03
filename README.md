@@ -505,10 +505,11 @@ and licensed under the **GNU Lesser General Public License, version 3 or later
 (LGPL-3.0-or-later)**. The full license texts are included in this repository
 as [`COPYING.LESSER`](./COPYING.LESSER) (LGPL-3.0) and [`COPYING`](./COPYING)
 (GPL-3.0, which the LGPL incorporates); see also
-<https://www.gnu.org/licenses/>. The license provenance of the pre-existing
-code this library builds upon is documented in
-[`LICENSE.md`](./LICENSE.md) and in the
-[Acknowledgments](./ACKNOWLEDGMENTS.md).
+<https://www.gnu.org/licenses/>. The project's history as a Paged.js fork and
+the replacement of all upstream-derived code are documented in
+[`LICENSE.md`](./LICENSE.md), the
+[Acknowledgments](./ACKNOWLEDGMENTS.md), and
+[`MIT_LICENSE_TRACKING.md`](./MIT_LICENSE_TRACKING.md).
 
 ## Acknowledgments
 

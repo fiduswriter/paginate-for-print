@@ -57,15 +57,31 @@ export interface PolisherHooks {
 }
 
 /**
- * The Polisher class handles the parsing and insertion of CSS stylesheets,
- * including remote resources and special hooks for processing CSS content.
+ * The Polisher is the CSS layer of the paged-media engine: it owns the shared
+ * hook map every per-stylesheet Sheet and behavior module works through,
+ * injects the baseline stylesheet and an empty work stylesheet into the
+ * document, and coordinates turning author CSS — fetched from URLs or given
+ * inline — into processed `<style>` elements in the document head.
+ *
+ * It is a thin facade: parsing, AST rewriting and hook triggering live in
+ * {@link Sheet}; the Polisher creates one Sheet per source with its shared
+ * hook map, awaits the sheet's parse pipeline, recursively resolves the
+ * sheet's applied `@import`s (each fully converted and inserted before the
+ * importing sheet is recorded), then serializes the post-handler AST and
+ * inserts the resulting text into the document head.
  */
 class Polisher {
+	/** One entry per processed stylesheet, in processing order. */
 	sheets: Sheet[];
+	/** Every `<style>` element created by {@link insert}, in creation order. */
 	inserted: HTMLStyleElement[];
+	/** The 12 live hooks, created in the constructor and never replaced. */
 	hooks: PolisherHooks;
+	/** The style element holding the baseline stylesheet; assigned by {@link setup}. */
 	base!: HTMLStyleElement;
+	/** The empty work style element created by {@link setup}. */
 	styleEl!: HTMLStyleElement;
+	/** The `sheet` CSSOM object of {@link styleEl}; `null` when none was created. */
 	styleSheet!: CSSStyleSheet | null;
 	/** Mirrored from the last processed sheet's `@page` size declarations. */
 	width?: Dimension;
@@ -79,13 +95,9 @@ class Polisher {
 	 * @param {boolean} [setup=true] - Whether to immediately run setup.
 	 */
 	constructor(setup?: boolean) {
-		/** @type {Sheet[]} */
 		this.sheets = [];
-
-		/** @type {HTMLStyleElement[]} */
 		this.inserted = [];
 
-		/** @type {Object<string, Hook>} */
 		this.hooks = {} as PolisherHooks;
 		this.hooks.onUrl = new Hook(this);
 		this.hooks.onAtPage = new Hook(this);
@@ -111,9 +123,11 @@ class Polisher {
 	 */
 	setup(): CSSStyleSheet | null {
 		this.base = this.insert(baseStyles);
+
 		this.styleEl = document.createElement("style");
 		document.head.appendChild(this.styleEl);
 		this.styleSheet = this.styleEl.sheet;
+
 		return this.styleSheet;
 	}
 
@@ -123,34 +137,35 @@ class Polisher {
 	 * @returns {Promise<string>} - The final processed CSS text.
 	 */
 	async add(...sources: Array<string | Record<string, string>>): Promise<string> {
-		let fetched: Array<Promise<string>> = [];
-		let urls: string[] = [];
+		const urls: string[] = [];
+		const fetched: Array<Promise<string> | string | undefined> = [];
 
-		for (let source of sources) {
-			let f: Promise<string> | undefined;
-
+		for (const source of sources) {
 			if (typeof source === "object") {
-				for (let url in source) {
-					let css = source[url];
-					urls.push(url);
-					f = Promise.resolve(css);
-				}
-			} else {
-				urls.push(source);
-				f = request(source).then((response) => response.text());
-			}
+				let value: string | undefined;
 
-			fetched.push(f!);
+				for (const href in source) {
+					urls.push(href);
+					value = source[href];
+				}
+
+				fetched.push(value as string);
+			} else {
+				urls.push(source as string);
+				fetched.push(request(source as string).then((response) => response.text()));
+			}
 		}
 
-		return await Promise.all(fetched).then(async (originals) => {
-			let text = "";
-			for (let index = 0; index < originals.length; index++) {
-				text = await this.convertViaSheet(originals[index], urls[index]);
-				this.insert(text);
-			}
-			return text;
-		});
+		let text = "";
+
+		const fetchedTexts = await Promise.all(fetched);
+
+		for (let index = 0; index < fetchedTexts.length; index++) {
+			text = await this.convertViaSheet(fetchedTexts[index] as string, urls[index]);
+			this.insert(text);
+		}
+
+		return text;
 	}
 
 	/**
@@ -161,25 +176,28 @@ class Polisher {
 	 * @returns {Promise<string>} - The processed CSS text.
 	 */
 	async convertViaSheet(cssStr: string, href: string): Promise<string> {
-		let sheet = new Sheet(href, this.hooks);
+		const sheet = new Sheet(href, this.hooks);
+
 		await sheet.parse(cssStr);
 
-		// Handle @imported styles recursively
-		for (let url of sheet.imported) {
-			let str = await request(url).then((response) => response.text());
-			let text = await this.convertViaSheet(str, url);
-			this.insert(text);
+		for (const url of sheet.imported) {
+			const response = await request(url);
+			const text = await response.text();
+			const converted = await this.convertViaSheet(text, url);
+			this.insert(converted);
 		}
 
 		this.sheets.push(sheet);
 
-		if (typeof sheet.width !== "undefined") {
+		if (sheet.width !== undefined) {
 			this.width = sheet.width;
 		}
-		if (typeof sheet.height !== "undefined") {
+
+		if (sheet.height !== undefined) {
 			this.height = sheet.height;
 		}
-		if (typeof sheet.orientation !== "undefined") {
+
+		if (sheet.orientation !== undefined) {
 			this.orientation = sheet.orientation;
 		}
 
@@ -192,13 +210,17 @@ class Polisher {
 	 * @returns {HTMLStyleElement} - The created style element.
 	 */
 	insert(text: string): HTMLStyleElement {
-		let head = document.querySelector("head");
-		let style = document.createElement("style");
-		style.setAttribute("data-paged-inserted-styles", "true");
-		style.appendChild(document.createTextNode(text));
-		head!.appendChild(style);
-		this.inserted.push(style);
-		return style;
+		const head = document.querySelector("head");
+		const styleEl = document.createElement("style");
+
+		styleEl.setAttribute("data-paged-inserted-styles", "true");
+		styleEl.appendChild(document.createTextNode(text));
+		// A missing head element throws a TypeError here, by design.
+		head!.appendChild(styleEl);
+
+		this.inserted.push(styleEl);
+
+		return styleEl;
 	}
 
 	/**
@@ -206,9 +228,11 @@ class Polisher {
 	 */
 	destroy(): void {
 		this.styleEl.remove();
-		this.inserted.forEach((s) => {
-			s.remove();
-		});
+
+		for (const styleEl of this.inserted) {
+			styleEl.remove();
+		}
+
 		this.sheets = [];
 	}
 }

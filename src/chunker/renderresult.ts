@@ -1,7 +1,8 @@
 import BreakToken from "./breaktoken.js";
 
 /**
- * Represents the result of a rendering operation.
+ * Represents the result of a rendering operation: the break token where
+ * rendering ended or needs to continue, plus an optional rendering error.
  */
 class RenderResult {
 	/** The token where rendering ended or needs to continue. */
@@ -12,7 +13,8 @@ class RenderResult {
 	/**
 	 * Create a RenderResult.
 	 *
-	 * @param {BreakToken} breakToken - A token indicating where rendering stopped due to overflow.
+	 * @param {BreakToken} breakToken - A token indicating where rendering
+	 *   stopped due to overflow.
 	 * @param {Error} [error] - Optional error encountered during rendering.
 	 */
 	constructor(breakToken?: BreakToken | null, error?: Error) {
@@ -32,11 +34,11 @@ export class OverflowContentError extends Error {
 	 * Create an OverflowContentError.
 	 *
 	 * @param {string} message - The error message.
-	 * @param {unknown[]} items - The content items that could not be rendered due to overflow.
+	 * @param {unknown[]} items - The content items that could not be rendered
+	 *   due to overflow.
 	 */
 	constructor(message: string, items: unknown[]) {
 		super(message);
-
 		this.items = items;
 	}
 }

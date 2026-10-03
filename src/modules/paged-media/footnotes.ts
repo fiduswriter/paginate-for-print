@@ -1,3 +1,31 @@
+/**
+ * CSS GCPM footnotes polyfill of the paged-media engine.
+ *
+ * Turns authored `float: footnote` declarations into a working footnote
+ * system: elements whose CSS says `float: footnote` are pulled out of the
+ * flowing content while a page is rendered, appended to a per-page footnote
+ * area at the bottom of the page, given auto-numbered markers, and given
+ * superscript "call" anchors at their original position in the text. Also
+ * implements `footnote-policy` (`auto` / `line` / `block`), `footnote-display`
+ * (`block` / `inline`), and the `::footnote-marker` / `::footnote-call`
+ * pseudo-elements (rewritten into real attribute selectors).
+ *
+ * Cooperates with the layout engine (`src/chunker/layout.ts`) over the CSS
+ * custom property `--paged-footnotes-height`, set inline on each page's
+ * `.paged_area` element: the layout engine reserves an estimated footnote
+ * height on that property before laying out a page (recording the reservation
+ * in `data-paged-footnote-reserve`); `.paged_page_content` sizes itself as
+ * `calc(100% - var(--paged-footnotes-height))`, so shrinking or growing the
+ * variable re-flows the columns. While a page is being filled this module
+ * only ever grows the height up to the recorded reserve (never below it); at
+ * page end it releases the reserve and sizes the area to the notes it
+ * actually holds.
+ *
+ * Cross-page footnote numbering is driven by an instance counter seeded onto
+ * every page as `--paged-footnotes-count`. Notes that overflow the footnote
+ * area are extracted, queued, and re-moved onto the following page (or onto a
+ * cloned continuation page when the flow has ended).
+ */
 import Handler from "../handler.js";
 import type { HandlerSource } from "../handler.js";
 import { isContainer, isElement, isText, walk } from "../../utils/dom.js";
@@ -6,949 +34,876 @@ import type BreakToken from "../../chunker/breaktoken.js";
 import csstree from "css-tree";
 import type { CssNode, List } from "css-tree";
 
+/**
+ * One registry entry: a generated selector string plus the parsed
+ * `footnote-policy` and `footnote-display` identifiers.
+ */
 interface FootnoteSelector {
 	selector: string;
 	policy: string;
 	display: string;
 }
 
+/**
+ * The structural subset of the chunker's Page that this module reads: the
+ * page root element and the page's `.paged_footnote_area` element.
+ */
 interface FootnotePage {
 	element: HTMLElement;
 	footnotesArea: HTMLElement;
 }
 
+/**
+ * The structural subset of the chunker used by `afterPageLayout`. The real
+ * `Chunker.clonePage` is async; this interface declares `void` and the call
+ * site never awaits it.
+ */
 interface FootnoteChunker {
 	settings: Record<string, any>;
 	clonePage(page: FootnotePage): void;
 }
 
+/**
+ * A narrow view of `Layout` used only to type the `findOverflow` call.
+ */
 interface OverflowFinder {
 	findOverflow(rendered: Element, bounds: DOMRect): Range | null | undefined;
 }
 
 /**
- * Handles the parsing, layout, and rendering of footnotes in paged content.
- *
- * Manages footnote policies, markers, calls, layout overflow, and alignment.
- * Extends the generic Handler class.
+ * The footnote handler, as described in the module documentation.
  */
 class Footnotes extends Handler {
+	/** Registry of footnote selectors keyed by generated selector string. */
 	footnotes: Record<string, FootnoteSelector>;
+
+	/** Pending footnote payloads (wrapper divs / extracted fragments) for the next page. */
 	needsLayout: Node[];
+
+	/** Notes whose call left the page with the overflow; re-attached later. */
 	overflow: HTMLElement[];
+
+	/** Running count of non-continuation footnote markers placed on completed pages. */
 	footnotesPlaced: number;
 
 	/**
-	 * Creates an instance of Footnotes.
-	 * @param {object} chunker - The chunker instance handling content chunks.
-	 * @param {object} polisher - The polisher instance handling polishing/layout.
-	 * @param {object} caller - The caller instance managing handler orchestration.
+	 * Wires the handler against the engine objects and initializes the four
+	 * state fields to fresh empty values.
+	 *
+	 * @param {HandlerSource} chunker - The chunker, exposing lifecycle hooks.
+	 * @param {HandlerSource} polisher - The polisher, exposing CSS hooks.
+	 * @param {HandlerSource} caller - The caller (previewer), exposing
+	 * preview hooks.
 	 */
 	constructor(chunker?: HandlerSource, polisher?: HandlerSource, caller?: HandlerSource) {
 		super(chunker, polisher, caller);
-
-		/**
-		 * Stores footnote selectors and their properties.
-		 * @type {Object.<string, {selector: string, policy: string, display: string}>}
-		 */
 		this.footnotes = {};
-
-		/**
-		 * Array of DOM fragments that need layout recalculation.
-		 * @type {Array<Node>}
-		 */
 		this.needsLayout = [];
-
-		/**
-		 * Array of footnote nodes that overflowed and are pending reinsertion.
-		 * @type {Array<Element>}
-		 */
 		this.overflow = [];
-
-		/**
-		 * Number of footnote markers placed on pages completed so far. Seeded
-		 * onto each page as `--paged-footnotes-count` so the footnote and
-		 * footnote-marker counters continue across page boundaries: Chromium
-		 * does not carry a counter scope into page subtrees appended after
-		 * the pages container was first rendered, so without the seed every
-		 * page would restart its footnote numbering at 1.
-		 * @type {number}
-		 */
 		this.footnotesPlaced = 0;
 	}
 
 	/**
-	 * Handles CSS declarations related to footnotes during parsing.
-	 * Detects `float: footnote`, `footnote-policy`, and `footnote-display` properties.
+	 * Polisher hook, fired for every declaration of every parsed rule.
 	 *
-	 * @param {object} declaration - The CSS declaration node.
-	 * @param {object} dItem - Declaration item in the list.
-	 * @param {object} dList - Declaration list.
-	 * @param {object} rule - The CSS rule node.
+	 * Handles `float: footnote` (registers the rule's generated selector and
+	 * strips the declaration so the browser never applies the float
+	 * natively), `footnote-policy` and `footnote-display` (attach the parsed
+	 * identifier to an already-registered selector's entry). Property names
+	 * and value identifiers are compared case-sensitively; only the first
+	 * child of the declaration value is inspected.
+	 *
+	 * @param {CssNode} declaration - The declaration node.
+	 * @param {List.Cursor} dItem - The declaration's cursor in its list.
+	 * @param {List} dList - The list containing the declaration.
+	 * @param {Object} rule - The containing rule context.
+	 * @param {CssNode} rule.ruleNode - The rule node (its prelude is
+	 * serialized into the registry key).
 	 */
-	onDeclaration(declaration: CssNode, dItem: List.Cursor, dList: List, rule: { ruleNode: CssNode }) {
-		let property = declaration.property;
-		if (property === "float") {
-			let identifier =
-				declaration.value.children && declaration.value.children.first();
-			let location = identifier && identifier.name;
-			if (location === "footnote") {
-				let selector = csstree.generate(rule.ruleNode.prelude);
-				this.footnotes[selector] = {
-					selector: selector,
-					policy: "auto",
-					display: "block",
-				};
+	onDeclaration(declaration: CssNode, dItem: List.Cursor, dList: List, rule: { ruleNode: CssNode }): void {
+		const value = declaration.value as { children?: List } | undefined;
+		const first = value && value.children && value.children.first();
+		const name = (first as { name?: string } | undefined)?.name;
+
+		if (declaration.property === "float") {
+			if (name === "footnote") {
+				const selector = csstree.generate(rule.ruleNode.prelude);
+				this.footnotes[selector] = { selector, policy: "auto", display: "block" };
 				dList.remove(dItem);
 			}
-		}
-		if (property === "footnote-policy") {
-			let identifier =
-				declaration.value.children && declaration.value.children.first();
-			let policy = identifier && identifier.name;
-			if (policy) {
-				let selector = csstree.generate(rule.ruleNode.prelude);
-				let note = this.footnotes[selector];
-				if (note) {
-					note.policy = policy;
+		} else if (declaration.property === "footnote-policy") {
+			if (name) {
+				const selector = csstree.generate(rule.ruleNode.prelude);
+				if (this.footnotes[selector]) {
+					this.footnotes[selector].policy = name;
 				}
 			}
-		}
-		if (property === "footnote-display") {
-			let identifier =
-				declaration.value.children && declaration.value.children.first();
-			let display = identifier && identifier.name;
-			let selector = csstree.generate(rule.ruleNode.prelude);
-			if (display && this.footnotes[selector]) {
-				let note = this.footnotes[selector];
-				if (note) {
-					note.display = display;
-				}
+		} else if (declaration.property === "footnote-display") {
+			const selector = csstree.generate(rule.ruleNode.prelude);
+			if (name && this.footnotes[selector]) {
+				this.footnotes[selector].display = name;
 			}
 		}
 	}
 
 	/**
-	 * Transforms pseudo selectors `::footnote-marker` and `::footnote-call`
-	 * into attribute selectors with pseudo-elements to enable footnote rendering.
+	 * Polisher hook, fired for every PseudoElementSelector found inside a
+	 * Selector node of a rule's prelude (pseudo-classes never reach it).
 	 *
-	 * @param {object} pseudoNode - The pseudo selector node.
-	 * @param {object} pItem - The item in pseudo selector list.
-	 * @param {object} pList - The pseudo selector list.
-	 * @param {string} selector - The full selector string.
-	 * @param {object} rule - The CSS rule node.
+	 * For `::footnote-marker` / `::footnote-call`, the first selector of the
+	 * prelude is rewritten in place: every pseudo-element is stripped from
+	 * the compound, a `data-footnote-marker` / `data-footnote-call`
+	 * attribute selector is appended, and the pseudo is replaced by
+	 * `::marker` / `::after`. Any other pseudo name leaves the AST
+	 * untouched; only the first comma-separated selector is rewritten.
+	 *
+	 * @param {CssNode} pseudoNode - The pseudo-element selector node.
+	 * @param {List.Cursor} pItem - The pseudo's cursor (unused).
+	 * @param {List} pList - The list containing the pseudo (unused).
+	 * @param {Object} selector - The sheet's selector-context object
+	 * (declared `string`; never read).
+	 * @param {Object} rule - The containing rule context.
+	 * @param {CssNode} rule.ruleNode - The rule node whose prelude is
+	 * rewritten.
 	 */
-	onPseudoSelector(pseudoNode: CssNode, pItem: List.Cursor, pList: List, selector: string, rule: { ruleNode: CssNode }) {
-		let name = pseudoNode.name;
-		if (name === "footnote-marker") {
-			let prelude = rule.ruleNode.prelude;
-			let newPrelude = new csstree.List();
-
-			prelude.children.first().children.each((node: CssNode) => {
-				if (node.type !== "PseudoElementSelector") {
-					newPrelude.appendData(node);
-				}
-			});
-
-			newPrelude.appendData({
-				type: "AttributeSelector",
-				name: {
-					type: "Identifier",
-					name: "data-footnote-marker",
-				},
-				flags: null,
-				loc: null,
-				matcher: null,
-				value: null,
-			});
-
-			newPrelude.appendData({
-				type: "PseudoElementSelector",
-				name: "marker",
-				loc: null,
-				children: null,
-			});
-
-			prelude.children.first().children = newPrelude;
+	onPseudoSelector(pseudoNode: CssNode, pItem: List.Cursor, pList: List, selector: string, rule: { ruleNode: CssNode }): void {
+		if (pseudoNode.name !== "footnote-marker" && pseudoNode.name !== "footnote-call") {
+			return;
 		}
 
-		if (name === "footnote-call") {
-			let prelude = rule.ruleNode.prelude;
-			let newPrelude = new csstree.List();
+		const attribute = pseudoNode.name === "footnote-marker"
+			? "data-footnote-marker"
+			: "data-footnote-call";
+		const pseudo = pseudoNode.name === "footnote-marker"
+			? "marker"
+			: "after";
 
-			prelude.children.first().children.each((node: CssNode) => {
-				if (node.type !== "PseudoElementSelector") {
-					newPrelude.appendData(node);
-				}
-			});
-
-			newPrelude.appendData({
-				type: "AttributeSelector",
-				name: {
-					type: "Identifier",
-					name: "data-footnote-call",
-				},
-				flags: null,
-				loc: null,
-				matcher: null,
-				value: null,
-			});
-
-			newPrelude.appendData({
-				type: "PseudoElementSelector",
-				name: "after",
-				loc: null,
-				children: null,
-			});
-
-			prelude.children.first().children = newPrelude;
-		}
+		const prelude = rule.ruleNode.prelude as { children: List };
+		const firstSelector = prelude.children.first() as CssNode;
+		const children = new csstree.List();
+		firstSelector.children.forEach((child: CssNode) => {
+			if (child.type !== "PseudoElementSelector") {
+				children.appendData(child);
+			}
+		});
+		children.appendData({
+			type: "AttributeSelector",
+			name: { type: "Identifier", name: attribute },
+			flags: null,
+			loc: null,
+			matcher: null,
+			value: null,
+		} as unknown as CssNode);
+		children.appendData({
+			type: "PseudoElementSelector",
+			name: pseudo,
+			loc: null,
+			children: null,
+		} as unknown as CssNode);
+		firstSelector.children = children;
 	}
 
 	/**
-	 * After parsing, processes and applies footnote attributes to matching elements.
+	 * Chunker hook, fired once per flow after the content is parsed, before
+	 * any page exists. Stamps every matched element of every registered
+	 * footnote selector.
 	 *
-	 * @param {Document} parsed - The parsed DOM document or fragment.
+	 * @param {Document | Element} parsed - The parsed source content.
 	 */
-	afterParsed(parsed: Document | Element) {
+	afterParsed(parsed: Document | Element): void {
 		this.processFootnotes(parsed, this.footnotes);
 	}
 
 	/**
-	 * Finds elements matching footnote selectors and adds footnote attributes.
-	 * Also marks their container parents with data attributes to indicate presence of notes.
+	 * Stamps the note-bearing elements of the parsed content: each element
+	 * matched by a registry key gets `data-note="footnote"`,
+	 * `data-break-before="avoid"`, the entry's policy and display as
+	 * `data-note-policy` / `data-note-display` (defaulting to `auto` /
+	 * `block` when falsy), and is passed to `processFootnoteContainer`.
 	 *
-	 * @param {Document|Element} parsed - The root parsed element.
-	 * @param {Object} notes - The footnotes configuration object.
+	 * @param {Document | Element} parsed - The parsed source content.
+	 * @param {Record<string, FootnoteSelector>} notes - The registry of
+	 * footnote selectors.
 	 */
-	processFootnotes(parsed: Document | Element, notes: Record<string, FootnoteSelector>) {
-		for (let n in notes) {
-			let elements = parsed.querySelectorAll(n);
-			let element: Element;
-			let note = notes[n];
-			for (var i = 0; i < elements.length; i++) {
-				element = elements[i];
-				element.setAttribute("data-note", "footnote");
-				element.setAttribute("data-break-before", "avoid");
-				element.setAttribute("data-note-policy", note.policy || "auto");
-			element.setAttribute("data-note-display", note.display || "block");
-			this.processFootnoteContainer(element as HTMLElement);
+	processFootnotes(parsed: Document | Element, notes: Record<string, FootnoteSelector>): void {
+		for (const selector in notes) {
+			const note = notes[selector];
+			const elements = parsed.querySelectorAll(selector);
+			for (const element of elements) {
+				const el = element as HTMLElement;
+				el.setAttribute("data-note", "footnote");
+				el.setAttribute("data-break-before", "avoid");
+				el.setAttribute("data-note-policy", note.policy || "auto");
+				el.setAttribute("data-note-display", note.display || "block");
+				this.processFootnoteContainer(el);
 			}
 		}
 	}
 
 	/**
-	 * Walks up the DOM from a footnote element to find its container.
-	 * Marks the closest container or last element with 'data-has-notes' attribute.
+	 * Marks the element that "carries" the note with `data-has-notes="true"`:
+	 * starting from the note's parent, the deepest non-container element
+	 * directly below the nearest container ancestor gets the attribute. A
+	 * parentless note is safe (nothing happens).
 	 *
-	 * @param {Element} node - The footnote element.
+	 * @param {HTMLElement} node - The note element.
 	 */
-	processFootnoteContainer(node: HTMLElement) {
+	processFootnoteContainer(node: HTMLElement): void {
 		let element = node.parentElement;
 		let prevElement = element;
 		while (element) {
 			if (isContainer(element)) {
-				prevElement!.setAttribute("data-has-notes", "true");
-				break;
+				(prevElement as HTMLElement).setAttribute("data-has-notes", "true");
+				return;
 			}
 			prevElement = element;
 			element = element.parentElement;
-			if (!element) {
-				prevElement.setAttribute("data-has-notes", "true");
-			}
+		}
+		if (prevElement) {
+			prevElement.setAttribute("data-has-notes", "true");
 		}
 	}
 
 	/**
-	 * Processes a node during rendering to find and handle footnotes within it.
+	 * Layout hook, fired for every element cloned into the rendered page.
+	 * Collects the node itself (when it is a note) or all its descendant
+	 * notes, and moves the visible ones into the page's footnote area.
 	 *
-	 * @param {Node} node - The DOM node to render.
+	 * @param {Node} node - The rendered clone.
 	 */
-	renderNode(node: Node) {
-		if (node.nodeType == 1) {
-			let notes: NodeListOf<HTMLElement> | HTMLElement[] | undefined;
-
-			if (!(node as HTMLElement).dataset) {
-				return;
-			}
-
-			if ((node as HTMLElement).dataset.note === "footnote") {
-				notes = [node as HTMLElement];
-			} else if (
-				(node as HTMLElement).dataset.hasNotes ||
-				(node as HTMLElement).querySelectorAll("[data-note='footnote']")
-			) {
-				notes = (node as HTMLElement).querySelectorAll("[data-note='footnote']") as NodeListOf<HTMLElement>;
-			}
-
-			if (notes && notes.length) {
-				this.findVisibleFootnotes(notes, node as HTMLElement);
-			}
+	renderNode(node: Node): void {
+		if (node.nodeType !== 1) {
+			return;
+		}
+		const el = node as HTMLElement;
+		if (!el.dataset) {
+			return;
+		}
+		let notes: NodeListOf<HTMLElement> | HTMLElement[];
+		if (el.dataset.note === "footnote") {
+			notes = [el];
+		} else {
+			notes = el.querySelectorAll("[data-note='footnote']");
+		}
+		if (notes.length > 0) {
+			this.findVisibleFootnotes(notes, el);
 		}
 	}
 
 	/**
-	 * Finds visible footnotes within a node and moves them into the footnote area.
+	 * Moves every note whose left edge lies within the content box's right
+	 * edge into the page's footnote area (with call creation). The node must
+	 * sit inside a page (have `.paged_page_content` and `.paged_area`
+	 * ancestors) or the non-null `closest` lookups throw.
 	 *
-	 * @param {NodeListOf<Element>} notes - List of footnote elements.
-	 * @param {Element} node - The container node to check visibility against.
+	 * @param {NodeListOf<HTMLElement> | HTMLElement[]} notes - The notes to
+	 * test and move.
+	 * @param {HTMLElement} node - The rendered element carrying the notes.
 	 */
-	findVisibleFootnotes(notes: NodeListOf<HTMLElement> | HTMLElement[], node: HTMLElement) {
-		let area: HTMLElement | null;
-		let size: DOMRect;
-		let right: number;
-		area = node.closest(".paged_page_content");
-		size = area!.getBoundingClientRect();
-		right = size.left + size.width;
-
-		for (let i = 0; i < notes.length; ++i) {
-			let currentNote = notes[i];
-			let bounds = currentNote.getBoundingClientRect();
-			let left = bounds.left;
-
-			if (left < right) {
-				this.moveFootnote(currentNote, node.closest(".paged_area") as HTMLElement, true);
+	findVisibleFootnotes(notes: NodeListOf<HTMLElement> | HTMLElement[], node: HTMLElement): void {
+		const area = node.closest(".paged_page_content") as HTMLElement;
+		const size = area.getBoundingClientRect();
+		const right = size.left + size.width;
+		for (let index = 0; index < notes.length; index++) {
+			const note = notes[index];
+			const bounds = note.getBoundingClientRect();
+			if (bounds.left < right) {
+				this.moveFootnote(note, node.closest(".paged_area") as HTMLElement, true);
 			}
 		}
 	}
 
 	/**
-	 * Sets the footnote area height on the page area, never below the
-	 * reserve the layout engine recorded for this page
-	 * (`data-paged-footnote-reserve`). While a page is being filled, the
-	 * columns are laid out against the reserved height; letting the actual
-	 * note content shrink the area back down would grow the columns again
-	 * and then re-shrink them with every further extraction, spilling
-	 * already-laid-out text.
+	 * Writes the footnote-area height custom property, clamped from below by
+	 * the layout engine's reservation (`data-paged-footnote-reserve`): while
+	 * the reserve attribute exists, the written height can never drop below
+	 * the reserved value.
 	 *
 	 * @param {HTMLElement} pageArea - The page's `.paged_area` element.
-	 * @param {number} px - The content-derived height in px.
-	 * @returns {void}
+	 * @param {number} px - The requested height in pixels.
 	 */
-	setFootnoteAreaHeight(pageArea: HTMLElement, px: number) {
+	setFootnoteAreaHeight(pageArea: HTMLElement, px: number): void {
 		const reserve = parseFloat(pageArea.dataset.pagedFootnoteReserve || "");
 		const value = Number.isFinite(reserve) ? Math.max(px, reserve) : px;
-		pageArea.style.setProperty("--paged-footnotes-height", `${value}px`);
+		pageArea.style.setProperty("--paged-footnotes-height", value + "px");
 	}
 
 	/**
-	 * Releases the layout engine's footnote reserve at the end of the page:
-	 * the area is sized to the notes it actually holds, so an over-estimate
-	 * does not leave a reserved-but-empty band at the bottom of the page.
+	 * End-of-page companion to the reserve: deletes the
+	 * `data-paged-footnote-reserve` attribute and shrinks the height
+	 * variable to the footnote content's actual extent — but only when that
+	 * is smaller than the current value (a release can only shrink).
 	 *
 	 * @param {HTMLElement} pageArea - The page's `.paged_area` element.
-	 * @returns {void}
 	 */
-	releaseFootnoteReserve(pageArea: HTMLElement) {
+	releaseFootnoteReserve(pageArea: HTMLElement): void {
 		if (pageArea.dataset.pagedFootnoteReserve === undefined) {
 			return;
 		}
 		delete pageArea.dataset.pagedFootnoteReserve;
-		const noteContent = pageArea.querySelector(
-			".paged_footnote_content",
-		) as HTMLElement | null;
+		const noteContent = pageArea.querySelector(".paged_footnote_content") as HTMLElement;
 		if (!noteContent) {
 			return;
 		}
 		const height = noteContent.scrollHeight;
-		const total =
-			this.marginsHeight(noteContent) +
+		const total = this.marginsHeight(noteContent) +
 			this.paddingHeight(noteContent) +
 			this.borderHeight(noteContent);
 		const final = Math.max(0, height + total);
-		const current =
-			parseFloat(
-				pageArea.style.getPropertyValue("--paged-footnotes-height"),
-			) || 0;
+		const current = parseFloat(pageArea.style.getPropertyValue("--paged-footnotes-height")) || 0;
 		if (final < current) {
-			pageArea.style.setProperty(
-				"--paged-footnotes-height",
-				`${final}px`,
-			);
+			pageArea.style.setProperty("--paged-footnotes-height", final + "px");
 		}
 	}
 
 	/**
-	 * Recalculates the height of footnote content and adjusts page CSS variables
-	 * to ensure proper layout according to footnote policy and overflow.
+	 * The per-move height negotiation: decides, from real browser geometry
+	 * and the note's policy, whether the note fits the page's footnote area
+	 * and how much the area must grow.
 	 *
-	 * @param {Element} node - The footnote node.
-	 * @param {Element} noteContent - The container of footnote content.
-	 * @param {Element} pageArea - The page area element.
-	 * @param {Element|null} noteCall - The footnote call element.
-	 * @param {boolean} needsNoteCall - Whether the footnote call should be rendered.
+	 * Branch order (first match wins):
+	 * (a) the call is horizontally outside the content box → the note is
+	 * removed (it belongs to a later column / page);
+	 * (b) the page holds no notes yet and there is not even room for the
+	 * empty area chrome above the call → the note is queued for the next
+	 * page in a plain wrapper div;
+	 * (c) the note is re-attached after an overflow cycle → grow the area to
+	 * the note's content (margins + borders, no padding);
+	 * (d) the grown area would still end above the call bottom → same fit
+	 * write as (c);
+	 * (e) the note does not fit under the policy but there is positive room
+	 * between the policy offset and the area top → grow to the policy delta
+	 * and clamp the inner content (forcing the policy break);
+	 * (f) otherwise nothing is written.
+	 *
+	 * @param {HTMLElement} node - The moved note element.
+	 * @param {HTMLElement} noteContent - The page's `.paged_footnote_content`.
+	 * @param {HTMLElement} pageArea - The page's `.paged_area` element.
+	 * @param {HTMLElement | null | undefined} noteCall - The note's call
+	 * anchor in the flow, when one exists.
+	 * @param {boolean} needsNoteCall - Whether the note's call was just
+	 * created (false for overflow re-attachments).
 	 */
-
-	recalcFootnotesHeight(node: HTMLElement, noteContent: HTMLElement, pageArea: HTMLElement, noteCall: HTMLElement | null | undefined, needsNoteCall: boolean) {
-		// Remove empty class
+	recalcFootnotesHeight(
+		node: HTMLElement,
+		noteContent: HTMLElement,
+		pageArea: HTMLElement,
+		noteCall: HTMLElement | null | undefined,
+		needsNoteCall: boolean,
+	): void {
 		if (noteContent.classList.contains("paged_footnote_empty")) {
 			noteContent.classList.remove("paged_footnote_empty");
 		}
+		const height = noteContent.scrollHeight;
 
-		// Get note content size
-		let height = noteContent.scrollHeight;
+		const area = pageArea.querySelector(".paged_page_content") as HTMLElement;
+		const areaBounds = area.getBoundingClientRect();
+		const right = areaBounds.left + areaBounds.width;
 
-		// Check the noteCall is still on screen
-		let area = pageArea.querySelector(".paged_page_content") as HTMLElement;
-		let size = area.getBoundingClientRect();
-		let right = size.left + size.width;
+		const noteCallBounds = noteCall && noteCall.getBoundingClientRect();
 
-		// TODO: add a max height in CSS
+		const noteArea = pageArea.querySelector(".paged_footnote_area") as HTMLElement;
+		const noteAreaBounds = noteArea.getBoundingClientRect();
 
-		// Check element sizes
-		let noteCallBounds = noteCall && noteCall.getBoundingClientRect();
-		let noteArea = pageArea.querySelector(".paged_footnote_area") as HTMLElement;
-		let noteAreaBounds = noteArea.getBoundingClientRect();
+		const total = this.marginsHeight(noteContent) +
+			this.paddingHeight(noteContent) +
+			this.borderHeight(noteContent);
 
-		// Get the @footnote margins
-		let noteContentMargins = this.marginsHeight(noteContent);
-		let noteContentPadding = this.paddingHeight(noteContent);
-		let noteContentBorders = this.borderHeight(noteContent);
-		let total = noteContentMargins + noteContentPadding + noteContentBorders;
-
-		// Get the top of the @footnote area
 		let notAreaTop = Math.floor(noteAreaBounds.top);
-		// If the height isn't set yet, remove the margins from the top
 		if (noteAreaBounds.height === 0) {
 			notAreaTop -= this.marginsHeight(noteContent, false);
 			notAreaTop -= this.paddingHeight(noteContent, false);
 			notAreaTop -= this.borderHeight(noteContent, false);
 		}
-		// Determine the note call position and offset per policy
-		let notePolicy = node.dataset.notePolicy;
+
+		const notePolicy = node.dataset.notePolicy;
 		let noteCallPosition = 0;
 		let noteCallOffset = 0;
 		if (noteCall) {
-			// Get the correct line bottom for super or sub styled callouts
-			let prevSibling = noteCall.previousSibling;
-			let range = new Range();
-			if (prevSibling) {
-				range.setStartBefore(prevSibling);
+			const range = document.createRange();
+			if (noteCall.previousSibling) {
+				range.setStartBefore(noteCall.previousSibling);
 			} else {
 				range.setStartBefore(noteCall);
 			}
 			range.setEndAfter(noteCall);
-			let rangeBounds = range.getBoundingClientRect();
+			const rangeBounds = range.getBoundingClientRect();
 			noteCallPosition = rangeBounds.bottom;
 			if (!notePolicy || notePolicy === "auto") {
 				noteCallOffset = Math.ceil(rangeBounds.bottom);
 			} else if (notePolicy === "line") {
 				noteCallOffset = Math.ceil(rangeBounds.top);
 			} else if (notePolicy === "block") {
-				// Check that there is a previous element on the page
-				let parentParagraph = noteCall.closest("p")!.previousElementSibling;
-				if (parentParagraph) {
-					noteCallOffset = Math.ceil(
-						parentParagraph.getBoundingClientRect().bottom,
-					);
+				const parentParagraph = noteCall.closest("p") as HTMLElement;
+				const previousParagraph = parentParagraph.previousElementSibling;
+				if (previousParagraph) {
+					noteCallOffset = Math.ceil((previousParagraph as HTMLElement).getBoundingClientRect().bottom);
 				} else {
 					noteCallOffset = Math.ceil(rangeBounds.bottom);
 				}
 			}
 		}
 
-		let contentDelta = height + total - noteAreaBounds.height;
-		// Space between the top of the footnotes area and the bottom of the footnote call
-		let noteDelta = noteCallPosition ? notAreaTop - noteCallPosition : 0;
-		// Space needed for the force a break for the policy of the footnote
-		let notePolicyDelta = noteCallPosition
+		const contentDelta = height + total - noteAreaBounds.height;
+		const noteDelta = noteCallPosition ? notAreaTop - noteCallPosition : 0;
+		const notePolicyDelta = noteCallPosition
 			? Math.floor(noteAreaBounds.top) - noteCallOffset
 			: 0;
-		let hasNotes = noteArea.querySelector("[data-note='footnote']");
-		if (needsNoteCall && noteCallBounds!.left > right) {
-			// Note is offscreen and will be chunked to the next page on overflow
+		const hasNotes = noteArea.querySelector("[data-note='footnote']");
+
+		if (needsNoteCall && (noteCallBounds as DOMRect).left > right) {
+			// The call is horizontally outside the content box: the note
+			// belongs to a later column; detach it for the next page.
 			node.remove();
 		} else if (!hasNotes && needsNoteCall && total > noteDelta) {
-			// No space to add even the footnote area
+			// Not even room for the empty footnote-area chrome: queue the
+			// note for the next page in a plain wrapper.
 			this.setFootnoteAreaHeight(pageArea, 0);
-			// Add a wrapper as this div is removed later
-			let wrapperDiv = document.createElement("div");
-			wrapperDiv.appendChild(node);
-			// Push to the layout queue for the next page
-			this.needsLayout.push(wrapperDiv);
+			const wrapper = document.createElement("div");
+			wrapper.appendChild(node);
+			this.needsLayout.push(wrapper);
 		} else if (!needsNoteCall) {
-			// Call was previously added, force adding footnote
+			// Re-attached after an overflow cycle: grow to the note's
+			// content (margins + borders, padding deliberately excluded).
 			this.setFootnoteAreaHeight(
 				pageArea,
-				height + noteContentMargins + noteContentBorders,
+				height + this.marginsHeight(noteContent) + this.borderHeight(noteContent)
 			);
 		} else if (noteCallPosition < noteAreaBounds.top - contentDelta) {
-			// the current note content will fit without pushing the call to the next page
+			// The note fits without pushing its call off the page.
 			this.setFootnoteAreaHeight(
 				pageArea,
-				height + noteContentMargins + noteContentBorders,
+				height + this.marginsHeight(noteContent) + this.borderHeight(noteContent)
 			);
 		} else if (notePolicyDelta > 0) {
-			// set height to just before note call
-			this.setFootnoteAreaHeight(
-				pageArea,
-				noteAreaBounds.height + notePolicyDelta,
-			);
-			let noteInnerContent = noteContent.querySelector(
-				".paged_footnote_inner_content",
-			) as HTMLElement;
-			noteInnerContent.style.height =
-				noteAreaBounds.height + notePolicyDelta - total + "px";
+			// Does not fit under the policy: grow by the policy delta and
+			// clamp the inner content so the clipped remainder is recovered
+			// by the afterPageLayout overflow pass.
+			this.setFootnoteAreaHeight(pageArea, noteAreaBounds.height + notePolicyDelta);
+			const noteInnerContent = noteContent.querySelector(".paged_footnote_inner_content") as HTMLElement;
+			noteInnerContent.style.height = (noteAreaBounds.height + notePolicyDelta - total) + "px";
 		}
 	}
 
 	/**
-	 * Moves a footnote node to the footnote area of a given page.
-	 * @param {Element} node - The footnote element to move.
-	 * @param {Element} pageArea - The page container element containing footnotes.
-	 * @param {boolean} needsNoteCall - Whether a footnote call link should be created.
-	 * @returns {void}
+	 * Moves one note element into a page's footnote area: creates or
+	 * re-finds its call anchor (when requested), dedupes by `data-ref`
+	 * against the area's content, appends the note, marks it with
+	 * `data-footnote-marker` and `id="note-<ref>"`, counts it (unless it is
+	 * a split continuation), and renegotiates the area height.
+	 *
+	 * @param {Node} node - The note element to move.
+	 * @param {HTMLElement} pageArea - The page's `.paged_area` element.
+	 * @param {boolean} needsNoteCall - Whether a call anchor must be created
+	 * (true) or already exists in the flow (false).
 	 */
-	moveFootnote(node: Node, pageArea: HTMLElement, needsNoteCall: boolean) {
-		// let pageArea = node.closest(".paged_area");
-		let noteArea = pageArea.querySelector(".paged_footnote_area") as HTMLElement;
-		let noteContent = noteArea.querySelector(".paged_footnote_content") as HTMLElement;
-		let noteInnerContent = noteContent.querySelector(
-			".paged_footnote_inner_content",
-		) as HTMLElement;
+	moveFootnote(node: Node, pageArea: HTMLElement, needsNoteCall: boolean): void {
+		const noteArea = pageArea.querySelector(".paged_footnote_area") as HTMLElement;
+		const noteContent = noteArea.querySelector(".paged_footnote_content") as HTMLElement;
+		const noteInnerContent = noteContent.querySelector(".paged_footnote_inner_content") as HTMLElement;
 
 		if (!isElement(node)) {
 			return;
 		}
+		const note = node as HTMLElement;
 
-		// Add call for the note but only if it's not overflow.
-		// If it is overflow, the parentElement will be null.
-		let noteCall: HTMLElement | undefined;
+		let noteCall: HTMLElement | null | undefined;
 		if (needsNoteCall) {
-			if (node.parentElement) {
-				noteCall = this.createFootnoteCall(node as HTMLElement);
+			if (note.parentElement) {
+				noteCall = this.createFootnoteCall(note);
 			} else {
-				let ref = (node as HTMLElement).dataset["ref"];
-				noteCall = pageArea.querySelector(`[data-ref="${ref}"]`) as HTMLElement;
+				// Overflow re-insertion: the call already exists in the page.
+				noteCall = pageArea.querySelector("[data-ref=\"" + note.dataset.ref + "\"]") as HTMLElement;
 			}
 		}
 
-		// Remove the break before attribute for future layout
-		(node as HTMLElement).removeAttribute("data-break-before");
+		note.removeAttribute("data-break-before");
 
-		// Check if note already exists for overflow
-		let existing = noteInnerContent.querySelector(
-			`[data-ref="${(node as HTMLElement).dataset.ref}"]`,
-		);
+		const existing = noteInnerContent.querySelector("[data-ref=\"" + note.dataset.ref + "\"]");
 		if (existing) {
-			// Remove the note from the flow but no need to render it again
-			node.remove();
+			// A copy of this note already sits in the area: drop the
+			// redundant one and stop (no counter change, no height recalc).
+			note.remove();
 			return;
 		}
 
-		// Add the note node
-		noteInnerContent.appendChild(node);
-
-		// Add marker
-		(node as HTMLElement).dataset.footnoteMarker = (node as HTMLElement).dataset.ref;
-
-		// A marker here means the footnote counter increments once (split
-		// continuations carry data-split-from and do not increment), so the
-		// running seed for later pages advances with it.
-		if (!(node as HTMLElement).dataset.splitFrom) {
+		noteInnerContent.appendChild(note);
+		note.dataset.footnoteMarker = note.dataset.ref;
+		if (!note.dataset.splitFrom) {
 			this.footnotesPlaced += 1;
 		}
+		note.id = "note-" + note.dataset.ref;
 
-		// Add Id
-		(node as HTMLElement).id = `note-${(node as HTMLElement).dataset.ref}`;
-
-		this.recalcFootnotesHeight(
-			node as HTMLElement,
-			noteContent,
-			pageArea,
-			noteCall,
-			needsNoteCall,
-		);
+		this.recalcFootnotesHeight(note, noteContent, pageArea, noteCall, needsNoteCall);
 	}
 
 	/**
-	 * Creates a footnote call (link) element that points to the footnote.
-	 * @param {Element} node - The footnote element to create a call for.
-	 * @returns {HTMLAnchorElement} The created footnote call anchor element.
+	 * Creates the in-text call anchor for a note and inserts it into the
+	 * flow at the note's original position. The anchor copies every class
+	 * of the note, carries `data-footnote-call` and `data-ref`, a
+	 * `data-data-counter-footnote-increment="1"` bookkeeping attribute, and
+	 * an `href` pointing at the note's future `id`.
+	 *
+	 * @param {HTMLElement} node - The note element (must have a parent).
+	 * @returns {HTMLAnchorElement} The inserted call anchor.
 	 */
-	createFootnoteCall(node: HTMLElement) {
-		let parentElement = node.parentElement;
-		let footnoteCall = document.createElement("a");
-		for (const className of node.classList) {
-			footnoteCall.classList.add(`${className}`);
+	createFootnoteCall(node: HTMLElement): HTMLAnchorElement {
+		const footnoteCall = document.createElement("a");
+		const classes = node.classList;
+		for (let index = 0; index < classes.length; index++) {
+			footnoteCall.classList.add(classes[index]);
 		}
-
-		footnoteCall.dataset.footnoteCall = node.dataset.ref!;
-		footnoteCall.dataset.ref = node.dataset.ref!;
-
-		// Increment for counters
-		footnoteCall.dataset.dataCounterFootnoteIncrement = 1 as unknown as string;
-
-		// Add link
-		footnoteCall.href = `#note-${node.dataset.ref}`;
-
-		parentElement!.insertBefore(footnoteCall, node);
-
+		footnoteCall.dataset.footnoteCall = node.dataset.ref;
+		footnoteCall.dataset.ref = node.dataset.ref;
+		footnoteCall.dataset.dataCounterFootnoteIncrement = "1";
+		footnoteCall.href = "#note-" + node.dataset.ref;
+		(node.parentElement as HTMLElement).insertBefore(footnoteCall, node);
 		return footnoteCall;
 	}
 
 	/**
-	 * Called after the page layout is complete to handle footnote overflow and layout.
-	 * @param {Element} pageElement - The page's root element in the DOM.
-	 * @param {Object} page - The page object containing footnotes and layout info.
-	 * @param {Object|null} breakToken - The token representing a page break, if any.
-	 * @param {Object} chunker - The chunker instance managing page chunks.
-	 * @returns {void}
+	 * Chunker hook, fired after a page's layout finished. Styles the
+	 * footnote inner content as a multicol container sized to the area (so
+	 * overflowing notes spill into an offscreen second column), detects
+	 * overflow with a fresh Layout over the footnote area, and on overflow
+	 * extracts the spilled content (splitting a note mid-content when
+	 * necessary), queues it for the next page, and sizes the area to what
+	 * remains. Finally clears the inner-content height and releases the
+	 * layout engine's footnote reserve.
+	 *
+	 * @param {HTMLElement} pageElement - The page's root element.
+	 * @param {FootnotePage} page - The Page object (its `footnotesArea` is
+	 * the page's `.paged_footnote_area`).
+	 * @param {BreakToken | null} breakToken - The resume token, null for
+	 * cloned continuation pages.
+	 * @param {FootnoteChunker} chunker - The chunker (used for its settings
+	 * and `clonePage`).
 	 */
-	afterPageLayout(pageElement: HTMLElement, page: FootnotePage, breakToken: BreakToken | null, chunker: FootnoteChunker) {
-		let pageArea = pageElement.querySelector(".paged_area") as HTMLElement;
-		let noteArea = page.footnotesArea;
-		let noteContent = noteArea.querySelector(".paged_footnote_content") as HTMLElement;
-		let noteInnerContent = noteArea.querySelector(
-			".paged_footnote_inner_content",
-		) as HTMLElement;
+	afterPageLayout(pageElement: HTMLElement, page: FootnotePage, breakToken: BreakToken | null, chunker: FootnoteChunker): void {
+		const pageArea = pageElement.querySelector(".paged_area") as HTMLElement;
+		const noteArea = page.footnotesArea;
+		const noteContent = noteArea.querySelector(".paged_footnote_content") as HTMLElement;
+		const noteInnerContent = noteArea.querySelector(".paged_footnote_inner_content") as HTMLElement;
 
-		let noteContentBounds = noteContent.getBoundingClientRect();
-		let { width } = noteContentBounds;
+		const noteContentBounds = noteContent.getBoundingClientRect();
+		noteInnerContent.style.columnWidth = Math.round(noteContentBounds.width) + "px";
+		noteInnerContent.style.columnGap = "calc(var(--paged-margin-right) + var(--paged-margin-left))";
 
-		noteInnerContent.style.columnWidth = Math.round(width) + "px";
-		noteInnerContent.style.columnGap =
-			"calc(var(--paged-margin-right) + var(--paged-margin-left))";
-
-		// Get overflow
-		let layout = new Layout(noteArea, undefined, chunker.settings);
-		let overflow = (layout as OverflowFinder).findOverflow(
-			noteInnerContent,
-			noteContentBounds,
-		);
+		const layout: OverflowFinder = new Layout(noteArea, undefined, chunker.settings);
+		const overflow = layout.findOverflow(noteInnerContent, noteContentBounds);
 
 		if (overflow) {
-			let { startContainer, startOffset } = overflow;
-			let extracted: DocumentFragment;
-			let footnoteContainer = isText(startContainer)
-				? (startContainer as Text).parentElement!.closest("[data-footnote-marker]")
+			const startContainer = overflow.startContainer;
+			const startOffset = overflow.startOffset;
+			const footnoteContainer = isText(startContainer)
+				? ((startContainer as Text).parentElement as HTMLElement).closest("[data-footnote-marker]")
 				: (startContainer as Element).closest("[data-footnote-marker]");
-			let notEntireNote = !footnoteContainer || startOffset;
-			if (!notEntireNote) {
+
+			let notEntireNote = !footnoteContainer || startOffset !== 0;
+			if (footnoteContainer && startOffset === 0) {
+				// Text before the overflow point inside the note means the
+				// note is split mid-content.
 				let pos: Node | null = startContainer;
 				while (pos && pos !== footnoteContainer) {
 					pos = pos.previousSibling || pos.parentNode;
 					if (isText(pos)) {
 						notEntireNote = true;
-						break;
 					}
 				}
 			}
 
+			let extracted: DocumentFragment;
 			if (notEntireNote) {
-				// Assuming overflow is not multipart.
+				// Partial split: extract the overflowing content and rebuild
+				// a continuation from a text-free clone of the whole note
+				// container, grafting the extracted content where the split
+				// child's shell stood.
 				extracted = overflow.extractContents();
+				const splitChild = extracted.firstElementChild as HTMLElement | null;
 
-				let splitChild = extracted.firstElementChild;
+				const parentRange = document.createRange();
+				parentRange.selectNode(footnoteContainer as Node);
+				const cloned = parentRange.cloneContents();
 
-				// Add any DOM structure above this node, but remove any text
-				// content from it.
-				// Assumes the footnote content is not anything complicated enough
-				// to need the more complicated handling that we do for the main
-				// content.
-				let parentRange = document.createRange();
-				parentRange.selectNode(footnoteContainer!);
-				parentRange.setEndAfter(footnoteContainer!);
-				let cloned = parentRange.cloneContents();
-				let walker = walk(cloned.firstChild as Node, cloned);
-
-				let toDelete: Text | undefined = undefined;
-				let next: IteratorResult<Node>;
-				let pos: Node | undefined;
-				let replacePos: Node | null | undefined;
-				let done: boolean | undefined;
-				while (!done) {
-					if (isElement(pos)) {
-						if ((pos as HTMLElement).dataset.ref == splitChild?.dataset.ref) {
-							replacePos = pos;
+				let replacePos: HTMLElement | undefined;
+				let pending: Text | null = null;
+				let current: Node | null = null;
+				const iterator = walk(cloned.firstChild as Node, cloned as unknown as Node);
+				for (;;) {
+					// Handle the previously yielded node (one-iteration lag).
+					if (current && isElement(current)) {
+						const el = current as HTMLElement;
+						if ((splitChild as HTMLElement | null)?.dataset?.ref == el.dataset.ref) {
+							replacePos = el;
 						}
-
-						if ((pos as HTMLElement).dataset.footnoteMarker) {
-							// Make sure counter isn't incremented and no new marker id rendered.
-							(pos as HTMLElement).dataset.splitFrom = true as unknown as string;
-							delete (pos as HTMLElement).dataset.footnoteMarker;
+						if (el.dataset.footnoteMarker) {
+							el.dataset.splitFrom = "true";
+							delete el.dataset.footnoteMarker;
 						}
 					}
-					next = walker.next();
-					pos = next.value as Node | undefined;
-					done = next.done;
-
-					if (toDelete) {
-						toDelete.remove();
-						toDelete = undefined;
+					const step = iterator.next();
+					if (step.done) {
+						break;
 					}
-					if (isText(pos)) {
-						toDelete = pos as Text;
-						replacePos = pos!.parentElement;
+					current = step.value;
+					if (pending) {
+						pending.remove();
+						pending = null;
 					}
+					if (isText(current)) {
+						pending = current as Text;
+						replacePos = (current as Text).parentElement as HTMLElement;
+					}
+				}
+				if (pending) {
+					pending.remove();
+					pending = null;
 				}
 
 				if (splitChild) {
-					splitChild.dataset.splitFrom = splitChild.dataset.ref!;
-					replacePos!.parentNode!.replaceChild(extracted, replacePos!);
+					splitChild.dataset.splitFrom = splitChild.dataset.ref;
+					((replacePos as HTMLElement).parentNode as Node).replaceChild(extracted, replacePos as HTMLElement);
 				} else {
-					replacePos!.appendChild(extracted);
+					(replacePos as HTMLElement).appendChild(extracted);
 				}
 
+				// The queued payload is the restructured clone, not the raw
+				// extracted range.
 				extracted = cloned;
 
 				this.handleAlignment(noteInnerContent.lastElementChild as HTMLElement);
 			} else {
-				// Adjust the range to take the entire footnote.
-				let range = document.createRange();
-				range.selectNode(footnoteContainer!);
-				range.setEndAfter(footnoteContainer!);
+				// The whole note overflows: extract it intact.
+				const range = document.createRange();
+				range.setStartBefore(footnoteContainer as Node);
+				range.setEndAfter(footnoteContainer as Node);
 				extracted = range.extractContents();
 			}
 
 			this.needsLayout.push(extracted);
 
+			// Clear the policy clamp from recalcFootnotesHeight branch (e).
 			noteContent.style.removeProperty("height");
 			noteInnerContent.style.removeProperty("height");
 
-			let noteInnerContentBounds = noteInnerContent.getBoundingClientRect();
-			let { height } = noteInnerContentBounds;
-
-			// Get the @footnote margins
-			let noteContentMargins = this.marginsHeight(noteContent);
-			let noteContentPadding = this.paddingHeight(noteContent);
-			let noteContentBorders = this.borderHeight(noteContent);
+			// Re-measure and write DIRECTLY, bypassing the reserve clamp
+			// (the page is already breaking; the columns must re-flow
+			// against the post-extraction height). Full chrome, including
+			// padding this time.
+			const height = noteInnerContent.getBoundingClientRect().height;
 			pageArea.style.setProperty(
 				"--paged-footnotes-height",
-				`${height + noteContentMargins + noteContentBorders + noteContentPadding}px`,
+				(height +
+					this.marginsHeight(noteContent) +
+					this.borderHeight(noteContent) +
+					this.paddingHeight(noteContent)) + "px"
 			);
 
-			// Hide footnote content if empty
 			if (noteInnerContent.childNodes.length === 0) {
 				noteContent.classList.add("paged_footnote_empty");
 			}
 
 			if (!breakToken) {
+				// The flow has ended but notes still overflow: a cloned
+				// continuation page receives them (clonePage triggers
+				// beforePageLayout on the clone, which drains needsLayout).
 				chunker.clonePage(page);
 			} else {
-				let breakBefore: string | undefined;
-				let previousBreakAfter: string | undefined;
-				let firstOverflowNode = (
-					breakToken.overflow as unknown as { node?: HTMLElement } | undefined
-				)?.node;
+				const overflowNode = (breakToken.overflow as unknown as { node?: HTMLElement }).node;
 				if (
-					firstOverflowNode &&
-					typeof firstOverflowNode.dataset !== "undefined" &&
-					typeof firstOverflowNode.dataset.previousBreakAfter !== "undefined"
+					overflowNode &&
+					overflowNode.dataset &&
+					(overflowNode.dataset.breakBefore || overflowNode.dataset.previousBreakAfter)
 				) {
-					previousBreakAfter = firstOverflowNode.dataset.previousBreakAfter;
-				}
-
-				if (
-					firstOverflowNode &&
-					typeof firstOverflowNode.dataset !== "undefined" &&
-					typeof firstOverflowNode.dataset.breakBefore !== "undefined"
-				) {
-					breakBefore = firstOverflowNode.dataset.breakBefore;
-				}
-
-				if (breakBefore || previousBreakAfter) {
 					chunker.clonePage(page);
 				}
 			}
 		}
-		noteInnerContent.style.height = "auto";
 
-		// The page is done: size the area to the notes it actually holds,
-		// releasing whatever the layout engine over-reserved. Measured after
-		// the inner content's height is released so scrollHeight is natural.
+		noteInnerContent.style.height = "auto";
 		this.releaseFootnoteReserve(pageArea);
 	}
 
 	/**
-	 * Handles alignment properties for the last split footnote element.
-	 * @param {Element} node - The footnote element to apply alignment on.
-	 * @returns {void}
+	 * Marks the last fragment of a split footnote for last-line alignment:
+	 * sets `data-last-split-element="true"` and copies the computed
+	 * `text-align-last` into `data-align-last-split-element` (mapping
+	 * `auto` to `justify`).
+	 *
+	 * @param {HTMLElement} node - The last rendered fragment of the note.
 	 */
-
-	handleAlignment(node: HTMLElement) {
-		let styles = window.getComputedStyle(node);
-		let alignLast = (styles as unknown as Record<string, string>)[
-			"text-align-last"
-		];
+	handleAlignment(node: HTMLElement): void {
+		const styles = window.getComputedStyle(node);
+		const alignLast = (styles as unknown as Record<string, string>)["text-align-last"];
 		node.dataset.lastSplitElement = "true";
 		if (alignLast === "auto") {
 			node.dataset.alignLastSplitElement = "justify";
 		} else {
-			node.dataset.alignLastSplitElement = alignLast;
+			node.dataset.alignLastSplitElement = alignLast as string;
 		}
 	}
 
 	/**
-	 * Called before laying out a page, to process any pending footnotes that need moving.
-	 * @param {Object} page - The page object containing DOM and layout data.
-	 * @returns {void}
+	 * Chunker hook, fired before each page's content layout. Seeds the
+	 * page's `--paged-footnotes-count` with the running count (BEFORE the
+	 * drain, so the seed reflects only markers placed on earlier pages),
+	 * then drains the pending-payload queue onto the page (with call
+	 * creation off — those notes' calls already exist in the flow).
+	 *
+	 * @param {FootnotePage} page - The Page about to be laid out.
 	 */
-	beforePageLayout(page: FootnotePage) {
-		// Seed this page's footnote counter with the markers placed on
-		// earlier pages (see footnotesPlaced).
-		page.element.style.setProperty(
-			"--paged-footnotes-count",
-			String(this.footnotesPlaced),
-		);
-
+	beforePageLayout(page: FootnotePage): void {
+		page.element.style.setProperty("--paged-footnotes-count", String(this.footnotesPlaced));
 		while (this.needsLayout.length) {
-			let fragment = this.needsLayout.shift();
-
-			Array.from(fragment!.childNodes).forEach((node) => {
-				this.moveFootnote(
-					node,
-					page.element.querySelector(".paged_area") as HTMLElement,
-					false,
-				);
-			});
+			const payload = this.needsLayout.shift() as Node;
+			const children = Array.from(payload.childNodes);
+			for (const child of children) {
+				this.moveFootnote(child, page.element.querySelector(".paged_area") as HTMLElement, false);
+			}
 		}
 	}
 
 	/**
-	 * Called after overflow content is removed; updates footnotes accordingly.
-	 * @param {Element} removed - The DOM fragment containing removed overflow nodes.
-	 * @param {Element} rendered - The DOM element where content is currently rendered.
-	 * @returns {void}
+	 * Layout hook, fired after overflow content was removed from the
+	 * rendered flow. Removes from the footnote area every note whose call
+	 * anchor left the page with the overflow (decrementing the counter for
+	 * non-continuation notes) and queues them for re-attachment; marks the
+	 * area empty when nothing is left.
+	 *
+	 * @param {HTMLElement} removed - The fragment that was taken out.
+	 * @param {HTMLElement} rendered - The rendered content wrapper.
 	 */
-	afterOverflowRemoved(removed: HTMLElement, rendered: HTMLElement) {
-		// Find the page area
-		let area = rendered.closest(".paged_area");
+	afterOverflowRemoved(removed: HTMLElement, rendered: HTMLElement): void {
+		const area = rendered.closest(".paged_area");
 		if (!area) {
 			return;
 		}
-
-		// Get any rendered footnotes
-		let notes = area.querySelectorAll(
-			".paged_footnote_area [data-note='footnote']",
-		) as NodeListOf<HTMLElement>;
-		for (let n = 0; n < notes.length; n++) {
-			const note = notes[n];
-			// Check if the call for that footnote has been removed with the overflow
-			let call = removed.querySelector(
-				`[data-footnote-call="${note.dataset.ref}"]`,
-			);
+		const notes = area.querySelectorAll(".paged_footnote_area [data-note='footnote']");
+		for (let index = 0; index < notes.length; index++) {
+			const note = notes[index] as HTMLElement;
+			const call = removed.querySelector("[data-footnote-call=\"" + note.dataset.ref + "\"]");
 			if (call) {
+				// The call left this page with the overflow, so the note
+				// must leave the area too.
 				note.remove();
-				// The note leaves this page's counter scope; it counts
-				// again when it is reinserted on the next page (split
-				// continuations never incremented and stay uncounted).
 				if (!note.dataset.splitFrom) {
 					this.footnotesPlaced -= 1;
 				}
 				this.overflow.push(note);
 			}
 		}
-		// Hide footnote content if empty
-		let noteInnerContent = area.querySelector(
-			".paged_footnote_inner_content",
-		) as HTMLElement;
+		const noteInnerContent = area.querySelector(".paged_footnote_inner_content");
 		if (noteInnerContent && noteInnerContent.childNodes.length === 0) {
-			noteInnerContent.parentElement!.classList.add("paged_footnote_empty");
+			(noteInnerContent.parentElement as HTMLElement).classList.add("paged_footnote_empty");
 		}
 	}
 
 	/**
-	 * Called after overflow content is added; reattaches footnotes and recalculates heights.
-	 * @param {Element} rendered - The DOM element where new content has been rendered.
-	 * @returns {void}
+	 * Layout hook, fired after carried overflow content was re-added to the
+	 * rendered flow of the new page. Moves notes still inside the re-added
+	 * flow normally, then re-attaches the queued overflow notes (deduping
+	 * stale copies), recounting them and renegotiating the area height.
+	 *
+	 * @param {HTMLElement} rendered - The rendered content wrapper.
 	 */
-	afterOverflowAdded(rendered: HTMLElement) {
-		let notes = rendered.querySelectorAll("[data-note='footnote']") as NodeListOf<HTMLElement>;
-		if (notes && notes.length) {
+	afterOverflowAdded(rendered: HTMLElement): void {
+		const notes = rendered.querySelectorAll("[data-note='footnote']") as NodeListOf<HTMLElement>;
+		if (notes.length) {
 			this.findVisibleFootnotes(notes, rendered);
 		}
-
-		let area = rendered.closest(".paged_area") as HTMLElement;
-		let noteContent = area.querySelector(".paged_footnote_content") as HTMLElement;
-		let notesInnerContent = area.querySelector(
-			".paged_footnote_inner_content",
-		) as HTMLElement;
+		const area = rendered.closest(".paged_area") as HTMLElement;
+		const noteContent = area.querySelector(".paged_footnote_content") as HTMLElement;
+		const notesInnerContent = area.querySelector(".paged_footnote_inner_content") as HTMLElement;
 
 		if (this.overflow.length) {
-			this.overflow.forEach((item) => {
-				// The note may have re-landed through moveFootnote while
-				// this stale overflow copy was already queued; keep one
-				// copy or the area renders an empty duplicate marker.
-				const existing = notesInnerContent.querySelector(
-					`[data-ref="${item.dataset.ref}"]`,
-				);
+			for (const item of this.overflow) {
+				const existing = notesInnerContent.querySelector("[data-ref=\"" + item.dataset.ref + "\"]");
 				if (existing && existing !== item) {
+					// An identical note already landed through moveFootnote:
+					// drop the stale copy.
 					item.remove();
-					return;
+					continue;
 				}
 				notesInnerContent.appendChild(item);
 				if (!item.dataset.splitFrom) {
 					this.footnotesPlaced += 1;
 				}
-				let call = rendered.querySelector(
-					`[data-ref="${item.dataset["ref"]}"]`,
-				);
-				this.recalcFootnotesHeight(item, noteContent, area, call as HTMLElement, false);
-			});
-
+				const call = rendered.querySelector("[data-ref=\"" + item.dataset.ref + "\"]") as HTMLElement | null;
+				this.recalcFootnotesHeight(item, noteContent, area, call, false);
+			}
 			this.overflow = [];
 		}
 	}
 
 	/**
-	 * Calculates the total vertical margin height of an element.
-	 * @param {Element} element - The DOM element to calculate margin height for.
-	 * @param {boolean} [total=true] - Whether to include bottom margin in the total.
-	 * @returns {number} The sum of the top (and optionally bottom) margin in pixels.
+	 * Sums the element's computed vertical margins. The top margin is
+	 * always added; the bottom margin only when `total` is true (default).
+	 * Unparsable or zero values contribute nothing.
+	 *
+	 * @param {HTMLElement} element - Element to measure.
+	 * @param {boolean} [total] - Include the bottom margin; true by default.
+	 * @returns {number} The integer sum.
 	 */
-	marginsHeight(element: HTMLElement, total = true) {
-		let styles = window.getComputedStyle(element);
-		let marginTop = parseInt(styles.marginTop);
-		let marginBottom = parseInt(styles.marginBottom);
-		let margin = 0;
-		if (marginTop) {
-			margin += marginTop;
+	marginsHeight(element: HTMLElement, total = true): number {
+		const styles = window.getComputedStyle(element);
+		const top = parseInt(styles.marginTop, 10);
+		const bottom = parseInt(styles.marginBottom, 10);
+		let sum = 0;
+		if (top) {
+			sum += top;
 		}
-		if (marginBottom && total) {
-			margin += marginBottom;
+		if (total && bottom) {
+			sum += bottom;
 		}
-		return margin;
+		return sum;
 	}
 
 	/**
-	 * Calculates the total vertical padding height of an element.
-	 * @param {Element} element - The DOM element to calculate padding height for.
-	 * @param {boolean} [total=true] - Whether to include bottom padding in the total.
-	 * @returns {number} The sum of the top (and optionally bottom) padding in pixels.
+	 * Sums the element's computed vertical padding. The top padding is
+	 * always added; the bottom padding only when `total` is true (default).
+	 * Unparsable or zero values contribute nothing.
+	 *
+	 * @param {HTMLElement} element - Element to measure.
+	 * @param {boolean} [total] - Include the bottom padding; true by default.
+	 * @returns {number} The integer sum.
 	 */
-	paddingHeight(element: HTMLElement, total = true) {
-		let styles = window.getComputedStyle(element);
-		let paddingTop = parseInt(styles.paddingTop);
-		let paddingBottom = parseInt(styles.paddingBottom);
-		let padding = 0;
-		if (paddingTop) {
-			padding += paddingTop;
+	paddingHeight(element: HTMLElement, total = true): number {
+		const styles = window.getComputedStyle(element);
+		const top = parseInt(styles.paddingTop, 10);
+		const bottom = parseInt(styles.paddingBottom, 10);
+		let sum = 0;
+		if (top) {
+			sum += top;
 		}
-		if (paddingBottom && total) {
-			padding += paddingBottom;
+		if (total && bottom) {
+			sum += bottom;
 		}
-		return padding;
+		return sum;
 	}
 
 	/**
-	 * Calculates the total vertical border height of an element.
-	 * @param {Element} element - The DOM element to calculate border height for.
-	 * @param {boolean} [total=true] - Whether to include bottom border in the total.
-	 * @returns {number} The sum of the top (and optionally bottom) border width in pixels.
+	 * Sums the element's computed vertical border widths (read from the
+	 * `borderTop` / `borderBottom` shorthands; the width leads the
+	 * serialized value in a browser, and engines that return an empty
+	 * string yield NaN, contributing nothing). The top border is always
+	 * added; the bottom border only when `total` is true (default).
+	 *
+	 * @param {HTMLElement} element - Element to measure.
+	 * @param {boolean} [total] - Include the bottom border; true by default.
+	 * @returns {number} The integer sum.
 	 */
-	borderHeight(element: HTMLElement, total = true) {
-		let styles = window.getComputedStyle(element);
-		let borderTop = parseInt(styles.borderTop);
-		let borderBottom = parseInt(styles.borderBottom);
-		let borders = 0;
-		if (borderTop) {
-			borders += borderTop;
+	borderHeight(element: HTMLElement, total = true): number {
+		const styles = window.getComputedStyle(element);
+		const top = parseInt(styles.borderTop, 10);
+		const bottom = parseInt(styles.borderBottom, 10);
+		let sum = 0;
+		if (top) {
+			sum += top;
 		}
-		if (borderBottom && total) {
-			borders += borderBottom;
+		if (total && bottom) {
+			sum += bottom;
 		}
-		return borders;
+		return sum;
 	}
 }
 

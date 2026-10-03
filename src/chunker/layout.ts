@@ -1,3 +1,16 @@
+/**
+ * The layout engine: fills one page (and, in manual-columns mode, one column
+ * at a time) with content taken from the still-unrendered source fragment,
+ * detects the moment content stops fitting, decides where the break goes,
+ * extracts the overflowing content from the page, and hands the caller a
+ * BreakToken describing where the next page must resume.
+ *
+ * Called once per page (and again per overflow-restart cycle) by
+ * `Page.layout` / `Page.append`, which construct one Layout instance per pass
+ * with the page's content area, the shared ChunkerHooks registry, and the
+ * page settings snapshot.
+ */
+
 import {
 	getBoundingClientRect,
 	getClientRects,
@@ -27,6 +40,7 @@ import {
 	indexOfTextNodeForOverflow,
 	isContainer,
 	isElement,
+	isIgnorable,
 	isText,
 	letters,
 	needsBreakBefore,
@@ -38,7 +52,6 @@ import {
 	prevValidNode,
 	rebuildTree,
 	replaceOrAppendElement,
-	validNode,
 	walk,
 	words,
 } from "../utils/dom.js";
@@ -60,50 +73,17 @@ type LayoutHooks = ChunkerHooks & {
 	beforeOverflow?: Hook<any>;
 };
 
-/**
- * A rendered element that acts as a CSS multi-column fragmentainer: content
- * flows through its columns and any excess spills into an additional
- * off-page column, which is detected as overflow.
- */
 interface FragmentainerMeta {
 	count: number;
 	gap: number;
 	columnWidth: number;
 }
 
-/** Tolerance in px for sub-pixel noise when classifying column positions. */
 const COLUMN_EPSILON = 1;
-
-/**
- * Tolerance in px for vertical overflow. Content whose bottom edge spills
- * into the bottom margin by up to this amount is accepted rather than
- * extracted as overflow. This absorbs sub-pixel rounding differences and
- * tiny residual fragments that would otherwise chase precision forever.
- */
 const OVERFLOW_TOLERANCE = 4;
-
-/**
- * Minimum number of words in a text node before the pretext-predicted break
- * path engages; below this the legacy walker's few rect reads are cheaper.
- */
 const PREDICT_MIN_WORDS = 12;
-
-/**
- * Upper bound on characters fed to measurement preparation. Text beyond
- * this prefix falls back to the legacy walker (breaks that far into a node
- * are rare; the node will have been split long before).
- */
 const PREDICT_MAX_CHARS = 6000;
-
-/**
- * Wrapping-width reductions tried in order when verification contradicts a
- * prediction; canvas-vs-DOM metric drift is typically within this range.
- */
 const PREDICT_WIDTH_SHRINKS_PX = [0, 1, 2];
-
-/**
- * Maximum number of stored prepared originals for continuation reuse.
- */
 const CONTINUATION_CACHE_MAX = 512;
 
 interface ContinuationEntry {
@@ -112,22 +92,9 @@ interface ContinuationEntry {
 	prepared: PreparedTextWithSegments;
 }
 
-/**
- * Module-level prediction state.
- *
- * Layout instances are created per page and per overflow-restart cycle, so
- * anything meant to live for a whole pagination run must sit here. This is
- * what makes "prepare each text once" hold across an entire document rather
- * than per layout attempt.
- */
 const predictFallbackNodes = new WeakSet<Text>();
 const continuationPreparedTexts = new Map<string, ContinuationEntry>();
 
-/**
- * Prepared source texts from the eager warm-up pass, keyed by the parent
- * element's data-ref. Populated once per flow when the whole document is
- * known; consulted by textBreak before any lazy preparation.
- */
 const eagerPreparedTexts = new Map<
 	string,
 	Array<{
@@ -138,46 +105,41 @@ const eagerPreparedTexts = new Map<
 	}>
 >();
 
-/** Minimum trimmed length for a text node to qualify for eager preparation. */
 const EAGER_MIN_CHARS = 60;
 
-/**
- * Computed-style records for every source element, keyed by data-ref.
- * Captured once per flow while the source is temporarily attached (see
- * prepareTextsEagerly); the column-span segment planner uses them to
- * estimate natural block heights without re-attaching the source.
- */
 const elementMeasures = new Map<string, ElementMeasure>();
 
-/**
- * Heights measured by cloning blocks into the off-screen probe host (the
- * fallback for content pretext cannot model, e.g. tables and images),
- * keyed by data-ref plus target width.
- */
 const segmentProbeCache = new Map<
 	string,
 	{ height: number; line: number; marginTop: number; marginBottom: number }
 >();
 
-/** Lazily-created hidden host for block height probes. */
 let segmentProbeHost: HTMLElement | null = null;
 
+/**
+ * Returns the shared hidden host used for block-height probes, creating it
+ * (appended to the document body, off-screen) when absent or detached.
+ */
 function getSegmentProbeHost(): HTMLElement {
-	if (!segmentProbeHost || !segmentProbeHost.isConnected) {
-		segmentProbeHost = document.createElement("div");
-		segmentProbeHost.setAttribute("data-paged-segment-probe", "");
-		segmentProbeHost.style.position = "absolute";
-		segmentProbeHost.style.visibility = "hidden";
-		segmentProbeHost.style.overflow = "hidden";
-		segmentProbeHost.style.height = "1px";
-		segmentProbeHost.style.left = "-99999px";
-		segmentProbeHost.style.top = "0px";
-		document.body.appendChild(segmentProbeHost);
+	if (segmentProbeHost && segmentProbeHost.isConnected) {
+		return segmentProbeHost;
 	}
-	return segmentProbeHost;
+	const host = document.createElement("div");
+	host.setAttribute("data-paged-segment-probe", "");
+	host.setAttribute(
+		"style",
+		"position: absolute; visibility: hidden; overflow: hidden; height: 1px; left: -99999px; top: 0px;",
+	);
+	document.body.appendChild(host);
+	segmentProbeHost = host;
+	return host;
 }
 
-/** Diagnostics for the prediction path (counts only; negligible cost). */
+/**
+ * Diagnostics counters for the text-prediction path. The exported object is
+ * mutated in place (and installed on `window.__pagedPredictStats`), so
+ * consumers observe live counts.
+ */
 export const predictStats = {
 	prepareCalls: 0,
 	prepareMs: 0,
@@ -192,7 +154,8 @@ export const predictStats = {
 };
 
 /**
- * Records why a prediction was rejected in favor of the legacy walker.
+ * Records a prediction rejection under the given reason and signals the
+ * caller to fall back to the legacy DOM walker.
  */
 function rejectPrediction(reason: string): null {
 	predictStats.rejects[reason] = (predictStats.rejects[reason] || 0) + 1;
@@ -204,20 +167,31 @@ function rejectPrediction(reason: string): null {
  */
 function textNodeIndexInParent(node: Text, parent: Element): number {
 	let index = 0;
-	for (const child of Array.from(parent.childNodes)) {
-		if (child === node) {
-			break;
+	for (let i = 0; i < parent.childNodes.length; i++) {
+		const childNode = parent.childNodes[i];
+		if (childNode === node) {
+			return index;
 		}
-		if (child.nodeType === Node.TEXT_NODE) {
+		if (childNode.nodeType === 3) {
 			index++;
 		}
 	}
-	return index;
+	return -1;
 }
 
 /**
- * Resets per-run prediction caches. Called once per flow so rerunning the
- * previewer on new content never matches stale entries.
+ * Counts maximal runs of non-whitespace characters.
+ */
+function countWords(text: string): number {
+	const matches = text.match(/\S+/g);
+	return matches ? matches.length : 0;
+}
+
+/**
+ * Clears the per-flow prediction caches: the continuation store, the eager
+ * warm-up entries, the element measures, and the segment probe cache, plus
+ * the eager-entry counter. Rejection counters, the fallback node memo, the
+ * probe host, and the hyphenation events are deliberately left untouched.
  */
 export function resetPredictionCaches(): void {
 	continuationPreparedTexts.clear();
@@ -234,24 +208,16 @@ export interface OverflowViolation {
 }
 
 export interface RenderWarning {
-	/** Hyphenation: a word was broken mid-word with an inserted hyphen glyph. */
 	kind: "hyphenation" | "sub-tolerance-spill";
-	/** Page number of the page the event occurred on, when known. */
 	page?: string;
 	detail: string;
 }
 
-/**
- * Mid-word hyphenation events per page number, recorded while paginating
- * and materialized into warnings by collectRenderWarnings.
- */
 const hyphenationEvents = new Map<string, number>();
 
 /**
- * Records that a word on a page received an engine-inserted hyphen at a
- * break point (as opposed to linguistic hyphenation rendered by the browser).
- *
- * @param page - Page number the event occurred on, when known.
+ * Records that one word on a page received an engine-inserted hyphen at a
+ * break point. Pure counter mutation; drained by collectRenderWarnings.
  */
 export function recordHyphenationWarning(page?: string): void {
 	const key = page || "-";
@@ -259,74 +225,68 @@ export function recordHyphenationWarning(page?: string): void {
 }
 
 /**
- * Collects non-fatal rendering notices for the client application:
- * - sub-tolerance protrusions: content that extends into the page margin by
- *   a few pixels (within OVERFLOW_TOLERANCE) — not reported as a violation,
- *   but worth surfacing;
- * - hyphenation: words broken mid-word with an inserted hyphen glyph.
- * The client can ignore these or act on them (rewording, tracking, etc.).
- * Drains the recorded hyphenation events; call once per completed flow.
- *
- * @param pagesArea - The element containing all rendered pages.
- * @returns Warnings accumulated during the flow.
+ * Collects sub-tolerance spill notices for every rendered page/container and
+ * drains the recorded hyphenation events. Never throws on a falsy
+ * pagesArea; returns only the hyphenation warnings in that case.
  */
 export function collectRenderWarnings(
 	pagesArea?: HTMLElement | null,
 ): RenderWarning[] {
 	const warnings: RenderWarning[] = [];
-
-	// Sub-tolerance protrusions.
 	if (pagesArea) {
 		const pages = pagesArea.querySelectorAll(".paged_page");
-		pages.forEach((pg) => {
-			const content = pg.querySelector(
-				".paged_page_content",
-			) as HTMLElement | null;
-			const wrapper = content?.querySelector(
-				":scope > div:not(.paged_float_top):not(.paged_float_bottom)",
-			) as HTMLElement | null;
+		for (const pg of pages) {
+			const content = pg.querySelector(".paged_page_content");
+			const wrapper = content
+				? content.querySelector(
+						":scope > div:not(.paged_float_top):not(.paged_float_bottom)",
+					)
+				: null;
 			if (!wrapper) {
-				return;
+				continue;
 			}
-			const columns = wrapper.querySelectorAll(
+			const columnBoxes = wrapper.querySelectorAll(
 				":scope > .paged_columns > .paged_column",
 			);
-			const containers = columns.length
-				? (Array.from(columns) as HTMLElement[])
+			const containers: Element[] = columnBoxes.length
+				? Array.from(columnBoxes)
 				: [wrapper];
 			for (const container of containers) {
-				const hProtrusion = container.scrollWidth - container.clientWidth;
+				const el = container as HTMLElement;
+				const hProtrusion = el.scrollWidth - el.clientWidth;
 				if (hProtrusion > 0 && hProtrusion <= OVERFLOW_TOLERANCE) {
 					warnings.push({
 						kind: "sub-tolerance-spill",
-						page: pg.dataset.pageNumber,
+						page: (pg as HTMLElement).dataset.pageNumber,
 						detail:
-							`content protrudes horizontally by ${hProtrusion}px ` +
+							"content protrudes horizontally by " +
+							hProtrusion +
+							"px " +
 							"(within tolerance)",
 					});
 				}
-				const vProtrusion = container.scrollHeight - container.clientHeight;
+				const vProtrusion = el.scrollHeight - el.clientHeight;
 				if (vProtrusion > 0 && vProtrusion <= OVERFLOW_TOLERANCE) {
 					warnings.push({
 						kind: "sub-tolerance-spill",
-						page: pg.dataset.pageNumber,
+						page: (pg as HTMLElement).dataset.pageNumber,
 						detail:
-							`content protrudes vertically by ${vProtrusion}px ` +
-							"(within tolerance)",
+							"content protrudes vertically by " +
+							vProtrusion +
+							"px (within tolerance)",
 					});
 				}
 			}
-		});
+		}
 	}
-
-	// Hyphenation events, aggregated per page.
-	const pageNumbers = Array.from(hyphenationEvents.keys()).sort((a, b) => {
-		const na = a === "-" ? Number.MAX_SAFE_INTEGER : Number(a);
-		const nb = b === "-" ? Number.MAX_SAFE_INTEGER : Number(b);
-		return na - nb;
+	const keys = Array.from(hyphenationEvents.keys());
+	keys.sort((a, b) => {
+		const an = a === "-" ? Number.MAX_SAFE_INTEGER : Number(a);
+		const bn = b === "-" ? Number.MAX_SAFE_INTEGER : Number(b);
+		return an - bn;
 	});
-	for (const key of pageNumbers) {
-		const count = hyphenationEvents.get(key)!;
+	for (const key of keys) {
+		const count = hyphenationEvents.get(key) || 0;
 		warnings.push({
 			kind: "hyphenation",
 			page: key === "-" ? undefined : key,
@@ -337,19 +297,12 @@ export function collectRenderWarnings(
 		});
 	}
 	hyphenationEvents.clear();
-
 	return warnings;
 }
 
 /**
- * Audits finished pages for content that ended up outside the space
- * designated for it.
- * * During pagination, spill into hidden columns is the normal overflow
- * signal; once rendering has completed, no such spill may remain. Used to
- * validate unverified (pure-pretext) text breaking after the fact.
- *
- * @param pagesArea - The element containing all rendered pages.
- * @returns One entry per page exhibiting horizontal or vertical spill.
+ * Audits finished pages for content that ended up outside its designated
+ * space. Returns [] for a falsy pagesArea.
  */
 export function validateRenderedPages(
 	pagesArea?: HTMLElement | null,
@@ -359,57 +312,56 @@ export function validateRenderedPages(
 		return violations;
 	}
 	const pages = pagesArea.querySelectorAll(".paged_page");
-	pages.forEach((pg) => {
-		const content = pg.querySelector(".paged_page_content") as HTMLElement | null;
-		const wrapper = content?.querySelector(
-			":scope > div:not(.paged_float_top):not(.paged_float_bottom)",
-		) as HTMLElement | null;
+	for (const pg of pages) {
+		const content = pg.querySelector(".paged_page_content");
+		const wrapper = content
+			? content.querySelector(
+					":scope > div:not(.paged_float_top):not(.paged_float_bottom)",
+				)
+			: null;
 		if (!wrapper) {
-			return;
+			continue;
 		}
-
-		const columns = wrapper.querySelectorAll(
+		const columnBoxes = wrapper.querySelectorAll(
 			":scope > .paged_columns > .paged_column",
 		);
-		const containers = columns.length
-			? (Array.from(columns) as HTMLElement[])
+		const containers: Element[] = columnBoxes.length
+			? Array.from(columnBoxes)
 			: [wrapper];
-
 		for (const container of containers) {
-			if (container.scrollWidth > container.clientWidth + COLUMN_EPSILON) {
+			const el = container as HTMLElement;
+			if (el.scrollWidth > el.clientWidth + COLUMN_EPSILON) {
 				violations.push({
 					page: pg.id,
 					kind: "h-spill",
-					detail: `scrollWidth ${container.scrollWidth} > clientWidth ${container.clientWidth}`,
+					detail:
+						"scrollWidth " +
+						el.scrollWidth +
+						" > clientWidth " +
+						el.clientWidth,
 				});
 			}
-			if (container.scrollHeight > container.clientHeight + OVERFLOW_TOLERANCE) {
+			if (el.scrollHeight > el.clientHeight + OVERFLOW_TOLERANCE) {
 				violations.push({
 					page: pg.id,
 					kind: "v-spill",
-					detail: `scrollHeight ${container.scrollHeight} > clientHeight ${container.clientHeight}`,
+					detail:
+						"scrollHeight " +
+						el.scrollHeight +
+						" > clientHeight " +
+						el.clientHeight,
 				});
 			}
 		}
-	});
+	}
 	return violations;
 }
 
 /**
- * Re-balances the final fragments of fragmented multicol blocks.
- *
- * While paginating, a multicol block that spans pages is constrained to
- * `height: <remaining>; column-fill: auto` so the browser fragments it.
- * Its last fragment, however, fits without a constraint — and an
- * unconstrained multicol container balances its columns per CSS Multi-col,
- * which is what `column-fill: balance` asks for on final pages. This pass
- * releases those constraints where doing so does not re-introduce overflow,
- * giving balanced last pages for free.
- *
- * Called automatically after a flow completes; safe to call again.
- *
- * @param pagesArea - The element containing all rendered pages.
- * @returns The number of fragments that were re-balanced.
+ * Re-balances the final fragments of fragmented (mid-flow) multicol blocks:
+ * lifts the forced height/column-fill constraint, checks whether the block
+ * still spills, and keeps the constraint when it does. Returns the number of
+ * fragments re-balanced.
  */
 export function rebalanceMulticolFinals(
 	pagesArea?: HTMLElement | null,
@@ -417,54 +369,73 @@ export function rebalanceMulticolFinals(
 	if (!pagesArea) {
 		return 0;
 	}
-	let rebalanced = 0;
+	let balanced = 0;
 	const constrained = pagesArea.querySelectorAll<HTMLElement>(
 		"[data-paged-fragmentainer-constrained]",
 	);
-	constrained.forEach((el) => {
+	for (const el of constrained) {
 		const savedHeight = el.style.height;
-		const savedFill = el.style.columnFill;
-		// Unconstrained multicol balances once our forced `column-fill:
-		// auto` is lifted too.
+		const savedColumnFill = el.style.columnFill;
 		el.style.height = "auto";
 		el.style.columnFill = "";
-		// Verify nothing now spills past the fragmentainer or its page.
 		el.getBoundingClientRect();
+		const rect = el.getBoundingClientRect();
+		const contentBottom =
+			el.closest(".paged_page_content")?.getBoundingClientRect().bottom ??
+			rect.bottom;
 		const spills =
 			el.scrollWidth > el.clientWidth + COLUMN_EPSILON ||
 			el.scrollHeight > el.clientHeight + COLUMN_EPSILON ||
-			el.getBoundingClientRect().bottom >
-				(el.closest(".paged_page_content")?.getBoundingClientRect()
-					.bottom ??
-					el.getBoundingClientRect().bottom) +
-					COLUMN_EPSILON;
+			rect.bottom > contentBottom + COLUMN_EPSILON;
 		if (spills) {
 			el.style.height = savedHeight;
-			el.style.columnFill = savedFill;
+			el.style.columnFill = savedColumnFill;
 		} else {
 			delete el.dataset.pagedFragmentainerConstrained;
-			rebalanced++;
+			balanced++;
 		}
-	});
-	return rebalanced;
+	}
+	return balanced;
 }
 
 /**
- * Re-balances root-level manual column rows that end early.
- *
- * Manual columns are filled sequentially by the layout engine. On a page
- * whose content ends early — the document's last page, a page that ends a
- * part (a forced page break, marked `data-paged-part-end` by the walk), or
- * a row that is terminated by a `column-span: all` element — this often
- * leaves the right-hand columns nearly empty while the left-hand column
- * holds the remaining content. When the author asked for `column-fill:
- * balance` (the CSS default), such rows are converted back into a native
- * CSS multi-column container for that row only; the browser then distributes
- * the remaining content evenly. If balancing would re-introduce overflow,
- * the row is left in its sequential layout.
- *
- * @param pagesArea - The element containing all rendered pages.
- * @returns The number of rows that were re-balanced.
+ * Balances one manual column row: relaxes the row's fixed sizing, verifies
+ * nothing spills (and that a completed row stays within its allocated
+ * bottom), and marks the row balanced when it succeeds. Returns whether the
+ * row was balanced.
+ */
+function balanceManualColumnRow(
+	row: HTMLElement,
+	columns: HTMLElement[],
+	maxBottom?: number,
+): boolean {
+	const savedFlex = row.style.flex;
+	row.style.flex = "0 0 auto";
+	row.style.height = "auto";
+	row.getBoundingClientRect();
+	const rect = row.getBoundingClientRect();
+	const contentBottom =
+		row.closest(".paged_page_content")?.getBoundingClientRect().bottom ??
+		rect.bottom;
+	const spills =
+		row.scrollWidth > row.clientWidth + COLUMN_EPSILON ||
+		row.scrollHeight > row.clientHeight + COLUMN_EPSILON ||
+		rect.bottom > contentBottom + COLUMN_EPSILON;
+	const overAllocated =
+		maxBottom !== undefined && rect.bottom > maxBottom + COLUMN_EPSILON;
+	if (spills || overAllocated || !columns.length) {
+		row.style.flex = savedFlex;
+		row.style.height = "";
+		return false;
+	}
+	row.setAttribute("data-paged-manual-columns-balanced", "true");
+	return true;
+}
+
+/**
+ * Re-balances root-level manual column rows that end early (last page,
+ * part-end pages, rows terminated by a span). Returns the number of rows
+ * converted.
  */
 export function rebalanceManualColumnFinals(
 	pagesArea?: HTMLElement | null,
@@ -472,208 +443,64 @@ export function rebalanceManualColumnFinals(
 	if (!pagesArea) {
 		return 0;
 	}
-
 	const pages = Array.from(
 		pagesArea.querySelectorAll<HTMLElement>(".paged_page"),
 	);
-	const candidatePages = new Set<HTMLElement>(
-		Array.from(
-			pagesArea.querySelectorAll<HTMLElement>(
-				".paged_page[data-paged-part-end]",
-			),
-		),
-	);
-	// The document's last page with columns always balances.
+	const candidatePages = new Set<HTMLElement>();
+	for (const page of pages) {
+		if (page.dataset.pagedPartEnd) {
+			candidatePages.add(page);
+		}
+	}
 	for (let i = pages.length - 1; i >= 0; i--) {
 		if (pages[i].querySelector(":scope .paged_flow > .paged_columns")) {
 			candidatePages.add(pages[i]);
 			break;
 		}
 	}
-
-	let rebalanced = 0;
+	let balanced = 0;
 	for (const page of pages) {
 		const rows = Array.from(
 			page.querySelectorAll<HTMLElement>(
 				":scope .paged_flow > .paged_columns",
 			),
 		);
-		for (let i = 0; i < rows.length; i++) {
-			const isLastRow = i === rows.length - 1;
+		for (let r = 0; r < rows.length; r++) {
+			const row = rows[r];
+			const isLastRow = r === rows.length - 1;
 			if (isLastRow && !candidatePages.has(page)) {
 				continue;
 			}
-
-			const row = rows[i];
 			if (!row.hasChildNodes()) {
 				continue;
 			}
-
 			const columns = Array.from(
 				row.querySelectorAll<HTMLElement>(":scope > .paged_column"),
 			);
 			if (columns.length <= 1) {
 				continue;
 			}
-
-			const fill = row.dataset.pagedColumnFill || "balance";
-			if (fill === "auto") {
+			if ((row.dataset.pagedColumnFill || "balance") === "auto") {
 				continue;
 			}
-
-			// Completed rows (those followed by a column-span or another row)
-			// must not grow past their already-allocated height, otherwise they
-			// would overlap the content that follows them on the same page.
-			const maxBottom = isLastRow
-				? undefined
-				: row.getBoundingClientRect().bottom;
+			let maxBottom: number | undefined = undefined;
+			if (!isLastRow) {
+				maxBottom = row.getBoundingClientRect().bottom;
+			}
 			if (balanceManualColumnRow(row, columns, maxBottom)) {
-				rebalanced++;
+				balanced++;
 			}
 		}
 	}
-	return rebalanced;
+	return balanced;
 }
 
 /**
- * Converts one manual-column row into a balanced native multicol block.
- * Keeps the conversion when the balanced layout fits, restores the
- * sequential layout when it would overflow.
- *
- * @param row - The `.paged_columns` row to balance.
- * @param columns - The row's column boxes.
- * @param maxBottom - Optional bottom boundary the balanced row must not cross.
- * @returns True when the row was left balanced.
- */
-function balanceManualColumnRow(
-	row: HTMLElement,
-	columns: HTMLElement[],
-	maxBottom?: number,
-): boolean {
-	const savedRowStyles = {
-		display: row.style.display,
-		height: row.style.height,
-		minHeight: row.style.minHeight,
-		flex: row.style.flex,
-		columnCount: row.style.columnCount,
-		columnGap: row.style.columnGap,
-		columnFill: row.style.columnFill,
-		columnRule: row.style.columnRule,
-	};
-	const savedColumnStyles = new Map<
-		HTMLElement,
-		{
-			display: string;
-			height: string;
-			flex: string;
-			width: string;
-			borderLeft: string;
-		}
-	>();
-	const gap = row.style.gap || row.style.columnGap || "1em";
-
-	row.style.display = "block";
-	row.style.height = "auto";
-	row.style.minHeight = "0";
-	// The row is still a flex item inside .paged_flow; keep it from growing
-	// past its balanced content height, otherwise the flex container would
-	// force it taller and re-introduce overflow.
-	row.style.flex = "0 0 auto";
-	row.style.columnCount = String(columns.length);
-	row.style.columnGap = gap;
-	row.style.columnFill = "balance";
-
-	columns.forEach((col) => {
-		savedColumnStyles.set(col, {
-			display: col.style.display,
-			height: col.style.height,
-			flex: col.style.flex,
-			width: col.style.width,
-			borderLeft: col.style.borderLeft,
-		});
-		col.style.display = "contents";
-		col.style.height = "auto";
-		col.style.flex = "";
-		col.style.width = "";
-		col.style.borderLeft = "";
-	});
-
-	const secondColumn = columns[1];
-	if (secondColumn && secondColumn.style.borderLeft) {
-		row.style.columnRule = secondColumn.style.borderLeft;
-	}
-
-	row.getBoundingClientRect();
-	const pageContent = row.closest(".paged_page_content") as HTMLElement | null;
-	const pageBottom = pageContent
-		? pageContent.getBoundingClientRect().bottom
-		: Infinity;
-	const bottomLimit =
-		maxBottom !== undefined ? Math.min(maxBottom, pageBottom) : pageBottom;
-	const rowRect = row.getBoundingClientRect();
-	const spills =
-		row.scrollWidth > row.clientWidth + COLUMN_EPSILON ||
-		row.scrollHeight > row.clientHeight + COLUMN_EPSILON ||
-		rowRect.bottom > bottomLimit + COLUMN_EPSILON;
-
-	if (spills) {
-		row.style.display = savedRowStyles.display;
-		row.style.height = savedRowStyles.height;
-		row.style.minHeight = savedRowStyles.minHeight;
-		row.style.flex = savedRowStyles.flex;
-		row.style.columnCount = savedRowStyles.columnCount;
-		row.style.columnGap = savedRowStyles.columnGap;
-		row.style.columnFill = savedRowStyles.columnFill;
-		row.style.columnRule = savedRowStyles.columnRule;
-		columns.forEach((col) => {
-			const saved = savedColumnStyles.get(col)!;
-			col.style.display = saved.display;
-			col.style.height = saved.height;
-			col.style.flex = saved.flex;
-			col.style.width = saved.width;
-			col.style.borderLeft = saved.borderLeft;
-		});
-		return false;
-	}
-	row.dataset.pagedManualColumnsBalanced = "";
-	return true;
-}
-
-function countWords(text: string): number {
-	let count = 0;
-	let inWord = false;
-	for (let i = 0; i < text.length; i++) {
-		const isSpace = /\s/.test(text[i]);
-		if (!isSpace && !inWord) {
-			count++;
-			inWord = true;
-		} else if (isSpace) {
-			inWord = false;
-		}
-	}
-	return count;
-}
-
-/**
- * Attaches the source fragment to a hidden host once per flow so computed
- * styles resolve, then captures measurements used later while the fragment
- * is detached again:
- *
- * - for every element with a data-ref, an ElementMeasure record (font spec,
- *   margins, padding/border, display) feeding the column-span segment
- *   height planner — captured in every measurement mode;
- * - when `textMeasurement === "pretext"`, prepared texts for every
- *   substantial text node, front-loading all segmentation and canvas
- *   measurement into one warm phase (after fonts have loaded), leaving
- *   textBreak pure arithmetic + probes afterwards.
- *
- * Flows containing elements that do not survive being moved between
- * parents (iframes, object/embed) skip the attach entirely; the planner
- * then stays disabled and textBreak prepares lazily.
- *
- * The fragment is temporarily attached inside a hidden container so
- * computed styles resolve; it is returned re-parented as a fresh fragment
- * for the caller to render from.
+ * One-per-flow warm-up pass: attaches the source fragment to a hidden host
+ * so computed styles resolve, captures element measures and (in pretext
+ * mode) prepared texts, then hands the nodes back to a fresh detached
+ * fragment. The input is returned unchanged when measurement is unavailable
+ * or the flow contains elements that do not survive being moved.
  */
 export function prepareTextsEagerly(
 	source: DocumentFragment | Node,
@@ -691,95 +518,83 @@ export function prepareTextsEagerly(
 	) {
 		return source;
 	}
-
 	const host = document.createElement("div");
 	host.setAttribute("data-paged-measure-host", "");
-	host.style.position = "absolute";
-	host.style.visibility = "hidden";
-	host.style.overflow = "hidden";
-	host.style.width = "1px";
-	host.style.height = "1px";
-	host.style.left = "-99999px";
-	host.style.top = "0px";
+	host.setAttribute(
+		"style",
+		"position: absolute; visibility: hidden; overflow: hidden; width: 1px; height: 1px; left: -99999px; top: 0px;",
+	);
 	document.body.appendChild(host);
-	host.appendChild(source);
-
+	host.appendChild(source as Node);
 	try {
 		setMeasureLocale(
-			(document.documentElement &&
-				document.documentElement.getAttribute("lang")) ||
-				undefined,
+			document.documentElement?.getAttribute("lang") || undefined,
 		);
-
-		// Element measures for the segment height planner (all modes).
-		const elWalker = document.createTreeWalker(
+		const elementWalker = document.createTreeWalker(
 			host,
 			NodeFilter.SHOW_ELEMENT,
 		);
-		let el = elWalker.nextNode() as HTMLElement | null;
-		while (el) {
-			const ref = el.dataset ? el.dataset.ref : undefined;
+		let element = elementWalker.nextNode();
+		while (element) {
+			const ref = (element as HTMLElement).dataset?.ref;
 			if (ref && !elementMeasures.has(ref)) {
-				const measure = buildElementMeasure(el);
-				if (measure) {
-					elementMeasures.set(ref, measure);
+				const measureRecord = buildElementMeasure(element as Element);
+				if (measureRecord) {
+					elementMeasures.set(ref, measureRecord);
 				}
 			}
-			el = elWalker.nextNode() as HTMLElement | null;
+			element = elementWalker.nextNode();
 		}
-
-		// The fragment adopted its children into host; walk those.
 		if (settings.textMeasurement === "pretext") {
-			const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
-			let current = walker.nextNode() as Text | null;
-			while (current) {
-				const full = current.data;
+			const textWalker = document.createTreeWalker(
+				host,
+				NodeFilter.SHOW_TEXT,
+			);
+			let textNode = textWalker.nextNode() as Text | null;
+			while (textNode) {
+				const full = textNode.textContent || "";
+				const parent = textNode.parentElement;
 				if (
 					full.trim().length >= EAGER_MIN_CHARS &&
-					countWords(full) >= PREDICT_MIN_WORDS
+					countWords(full) >= PREDICT_MIN_WORDS &&
+					parent &&
+					parent.dataset.ref
 				) {
-					const parent = current.parentElement as HTMLElement | null;
-					const ref = parent?.dataset.ref;
-					if (parent && ref) {
-						const spec = buildFontSpec(parent);
-						if (spec && spec.lineHeight > 0) {
-							const key = fontKey(spec);
-							const prepared = getTextMeasureService().prepare(full, spec);
-							let list = eagerPreparedTexts.get(ref);
-							if (!list) {
-								list = [];
-								eagerPreparedTexts.set(ref, list);
-							}
-							list.push({
-								childIndex: textNodeIndexInParent(current, parent),
-								fullText: full,
-								fontKey: key,
-								prepared,
-							});
-							predictStats.eagerEntries++;
+					const spec = buildFontSpec(parent);
+					if (spec && spec.lineHeight > 0) {
+						const prepared = getTextMeasureService().prepare(full, spec);
+						const ref = parent.dataset.ref;
+						let list = eagerPreparedTexts.get(ref);
+						if (!list) {
+							list = [];
+							eagerPreparedTexts.set(ref, list);
 						}
+						list.push({
+							childIndex: textNodeIndexInParent(textNode, parent),
+							fullText: full,
+							fontKey: fontKey(spec),
+							prepared,
+						});
+						predictStats.eagerEntries++;
 					}
 				}
-				current = walker.nextNode() as Text | null;
+				textNode = textWalker.nextNode() as Text | null;
 			}
 		}
-	} finally {
-		// Hand the nodes back to a detached fragment for rendering.
-		const restored = document.createDocumentFragment();
-		while (host.firstChild) {
-			restored.appendChild(host.firstChild);
-		}
-		host.remove();
-		source = restored;
+	} catch (error) {
+		console.warn(
+			"paged-with-floats: eager text preparation failed: " +
+				(error as Error).message,
+		);
 	}
-
-	return source;
+	const out = document.createDocumentFragment();
+	while (host.firstChild) {
+		out.appendChild(host.firstChild);
+	}
+	host.remove();
+	return out;
 }
 
-/**
- * Layout
- * @class
- */
 class Layout {
 	element: HTMLElement;
 	bounds: DOMRect;
@@ -791,11 +606,8 @@ class Layout {
 	forceRenderBreak: boolean;
 	temporaryIndex: number;
 	failed?: boolean;
-	/** Selector strings that may produce fragmentainers (from author CSS). */
 	multicolSelectors: Set<string>;
-	/** Selectors declaring `column-span: all` (full-width rows). */
 	columnSpanSelectors: Set<string>;
-	/** Root-level multicol config applied to the page wrapper (if any). */
 	rootColumns?: {
 		count: number;
 		gap?: string;
@@ -804,38 +616,15 @@ class Layout {
 		ruleStyle?: string;
 		ruleWidth?: string;
 	};
-	/** Rendered fragmentainer roots found on this page. */
 	fragmentainers: Set<Element>;
-	/** Cached per-element column metadata. */
 	private fragmentainerMeta: WeakMap<Element, FragmentainerMeta>;
-	/** Saved inline heights of fragmentainers during unconstrained measuring. */
 	private savedFragmentainerHeights: Map<Element, string>;
-	/** Whether this.bounds no longer reflects the mutated DOM. */
 	private boundsDirty = true;
-	/** Whether findOverflow is running inside the residual sweep, where
-	 *  range tags from an earlier extraction may no longer match the
-	 *  shrunken bounds and should not hide a genuinely overflowing block. */
 	private inResidualSweep = false;
-	/** Shared pretext-backed measurement service (predict fast path). */
 	private measure = getTextMeasureService();
-	/** Text nodes for which prediction already proved unprofitable. */
 	private predictFallbacks = predictFallbackNodes;
-	/** Prepared originals keyed by parent ref, reusable by continuation suffixes. */
 	private continuationPrepared = continuationPreparedTexts;
-	/**
-	 * Whether predicted breaks are verified against real DOM rects before
-	 * being accepted. Disable via settings `verifyTextPrediction: false` to
-	 * run pure-arithmetic breaking; output should then be audited
-	 * post-render with validateRenderedPages().
-	 */
 	private predictionVerified: boolean;
-	/**
-	 * Planned natural heights for `column-span` segments on this page, keyed
-	 * by the data-ref of the span element that opens each segment. Computed
-	 * once per page by planSegmentHeights(); consumed by applyColumnSpan().
-	 * Entries with `defer` mark spans that should be deferred to the next
-	 * page because the planner found no room for the segment they open.
-	 */
 	private segmentHeightQueue: Array<{
 		ref: string;
 		height: number | null;
@@ -845,81 +634,47 @@ class Layout {
 	}> = [];
 
 	/**
-	 * Whether the final character of a text node renders outside its
-	 * fragmentainer / page bounds. Flow order is monotonic, so the tail
-	 * overflowing is equivalent to the node straddling the break.
+	 * Constructs one layout pass for a page content area (or, later, a
+	 * manual column once setActiveColumn swaps the root).
+	 *
+	 * @param {HTMLElement} element - The page content area to fill.
+	 * @param {ChunkerHooks} [hooks] - The chunker's hook registry; a
+	 *   fallback registry is created when omitted.
+	 * @param {Record<string, unknown>} [options] - The page settings
+	 *   snapshot (maxChars, multicolSelectors, columnSpanSelectors,
+	 *   rootColumns, textMeasurement, verifyTextPrediction, hyphenGlyph).
 	 */
-	private textEndOverflows(
-		node: Text,
-		frag: Element | null,
-		parentAdditions: number,
-	): boolean {
-		const len = node.data.length;
-		if (!len) {
-			return false;
-		}
-		const range = document.createRange();
-		range.setStart(node, len - 1);
-		range.setEnd(node, len);
-		const rect = range.getBoundingClientRect();
-		if (!rect || (!rect.height && !rect.width)) {
-			return true; // Unmeasurable: let the full path decide.
-		}
-		return this.rectOverflows(
-			new DOMRect(
-				rect.left,
-				rect.top,
-				rect.right - rect.left,
-				rect.bottom - rect.top,
-			),
-			parentAdditions,
-			frag,
-		);
-	}
-
 	constructor(
 		element: HTMLElement,
 		hooks?: ChunkerHooks,
 		options?: Record<string, unknown>,
 	) {
 		this.element = element;
-
-		this.bounds = this.element.getBoundingClientRect();
-		this.parentBounds = this.element.offsetParent?.getBoundingClientRect() || {
-			left: 0,
+		this.bounds = element.getBoundingClientRect();
+		this.parentBounds =
+			(element.offsetParent as HTMLElement | null)?.getBoundingClientRect() || {
+				left: 0,
+			};
+		const gapValue = parseFloat(getComputedStyle(element).columnGap);
+		this.gap = gapValue
+			? gapValue - (this.bounds.left - this.parentBounds.left)
+			: 0;
+		this.hooks = (hooks as LayoutHooks) || {
+			onPageLayout: new Hook(),
+			layout: new Hook(),
+			renderNode: new Hook(),
+			layoutNode: new Hook(),
+			beforeOverflow: new Hook(),
+			onOverflow: new Hook(),
+			afterOverflowRemoved: new Hook(),
+			afterOverflowAdded: new Hook(),
+			onBreakToken: new Hook(),
+			beforeRenderResult: new Hook(),
 		};
-		let gap = parseFloat(window.getComputedStyle(this.element).columnGap);
-
-		if (gap) {
-			let leftMargin = this.bounds.left - this.parentBounds.left;
-			this.gap = gap - leftMargin;
-		} else {
-			this.gap = 0;
-		}
-
-		if (hooks) {
-			this.hooks = hooks as LayoutHooks;
-		} else {
-			this.hooks = {} as unknown as LayoutHooks;
-			this.hooks.onPageLayout = new Hook();
-			this.hooks.layout = new Hook();
-			this.hooks.renderNode = new Hook();
-			this.hooks.layoutNode = new Hook();
-			this.hooks.beforeOverflow = new Hook();
-			this.hooks.onOverflow = new Hook();
-			this.hooks.afterOverflowRemoved = new Hook();
-			this.hooks.afterOverflowAdded = new Hook();
-			this.hooks.onBreakToken = new Hook();
-			this.hooks.beforeRenderResult = new Hook();
-		}
-
 		this.settings = options || {};
-
 		this.maxChars = (this.settings.maxChars as number) || MAX_CHARS_PER_BREAK;
 		this.forceRenderBreak = false;
-
 		this.temporaryIndex = 0;
-
 		this.multicolSelectors =
 			(this.settings.multicolSelectors as Set<string>) || new Set();
 		this.columnSpanSelectors =
@@ -928,121 +683,3196 @@ class Layout {
 		this.fragmentainers = new Set();
 		this.fragmentainerMeta = new WeakMap();
 		this.savedFragmentainerHeights = new Map();
-		this.predictionVerified =
-			this.settings.verifyTextPrediction !== false;
+		this.boundsDirty = true;
+		this.inResidualSweep = false;
+		this.measure = getTextMeasureService();
+		this.predictFallbacks = predictFallbackNodes;
+		this.continuationPrepared = continuationPreparedTexts;
+		this.predictionVerified = this.settings.verifyTextPrediction !== false;
+		this.segmentHeightQueue = [];
 	}
 
 	/**
-	 * Marks cached page bounds as stale after a DOM or style mutation.
+	 * Marks the cached bounds stale so the next refreshBounds re-reads the
+	 * element's rect. Called after every DOM mutation the engine makes.
 	 */
 	invalidateBounds(): void {
 		this.boundsDirty = true;
 	}
 
 	/**
-	 * The manual column boxes of a flow host, or the host itself when the
-	 * page is single-column. Content is filled into these sequentially.
-	 *
-	 * With `column-span` segments the host holds several `.paged_columns`
-	 * rows; the active row is the last one (newest segment).
-	 *
-	 * @param {HTMLElement} wrapper - The page's flow host (`.paged_flow`).
-	 * @returns {HTMLElement[]} The containers to fill, in order.
+	 * Returns the lazily-shared bounds for the current mutation batch:
+	 * re-reads geometry at most once between invalidations. Manual columns
+	 * inside a flow host report their own box rather than the flow's.
+	 */
+	refreshBounds(): DOMRect {
+		if (!this.boundsDirty) {
+			return this.bounds;
+		}
+		this.bounds = this.element.getBoundingClientRect();
+		if (
+			this.element.classList.contains("paged_column") &&
+			this.element.closest(".paged_flow")
+		) {
+			this.bounds = this.manualColumnBounds(this.element);
+		}
+		this.boundsDirty = false;
+		return this.bounds;
+	}
+
+	/**
+	 * Makes a column the active layout root. Only columns swap the root
+	 * element; single-column pages keep the content area. Bounds are
+	 * computed immediately either way.
+	 */
+	setActiveColumn(dest: HTMLElement): void {
+		if (dest.classList.contains("paged_column")) {
+			this.element = dest;
+		}
+		this.boundsDirty = true;
+		if (
+			dest.classList.contains("paged_column") &&
+			dest.closest(".paged_flow")
+		) {
+			this.bounds = this.manualColumnBounds(dest);
+		} else {
+			this.bounds = this.refreshBounds();
+		}
+	}
+
+	/**
+	 * The column's own box: flex already sizes manual columns for the top
+	 * float and span segments, so using the flow host's full height here
+	 * would make columns inside a shorter segment accept the whole page.
+	 */
+	private manualColumnBounds(column: HTMLElement): DOMRect {
+		const rect = column.getBoundingClientRect();
+		return new DOMRect(
+			rect.left,
+			rect.top,
+			rect.width,
+			Math.max(0, rect.height),
+		);
+	}
+
+	/**
+	 * Whether the element is a multi-column fragmentainer (column-count > 1).
+	 */
+	isMulticolElement(el: Element): boolean {
+		return this.getFragmentainerMeta(el).count > 1;
+	}
+
+	/**
+	 * The cached fragmentainer geometry for an element: column count, gap
+	 * (approximating `normal` as 1em) and per-column width.
+	 */
+	getFragmentainerMeta(el: Element): FragmentainerMeta {
+		let meta = this.fragmentainerMeta.get(el);
+		if (meta) {
+			return meta;
+		}
+		const style = getComputedStyle(el);
+		const count = parseInt(style.columnCount) || 1;
+		let gap = parseFloat(style.columnGap);
+		if (Number.isNaN(gap)) {
+			gap = parseFloat(style.fontSize) || 0;
+		}
+		const width = el.clientWidth || el.getBoundingClientRect().width;
+		const columnWidth =
+			count > 1 ? (width - (count - 1) * gap) / count : width;
+		meta = { count, gap, columnWidth };
+		this.fragmentainerMeta.set(el, meta);
+		return meta;
+	}
+
+	/**
+	 * The layout box of a fragmentainer. A fragmented multicol container's
+	 * bounding rect is the union across all fragments, which poisons
+	 * geometry; the real box starts at the first client rect and is sized by
+	 * the client dimensions.
+	 */
+	fragmentainerBox(el: Element): {
+		left: number;
+		top: number;
+		right: number;
+		bottom: number;
+	} {
+		const rect = el.getBoundingClientRect();
+		let left = rect.left;
+		let top = rect.top;
+		if (el instanceof HTMLElement) {
+			const rects = el.getClientRects();
+			if (rects && rects.length) {
+				left = rects[0].left;
+				top = rects[0].top;
+			}
+		}
+		let width = el.clientWidth || rect.width;
+		let height = el.clientHeight || rect.height;
+		if (!width) {
+			width = rect.width;
+		}
+		if (!height) {
+			height = rect.height;
+		}
+		return {
+			left,
+			top,
+			right: left + width,
+			bottom: top + height,
+		};
+	}
+
+	/**
+	 * Registers every multicol element reachable from `root`: the root
+	 * itself when it is a multicol HTMLElement, plus every match of the
+	 * configured multicol selectors (invalid selectors are skipped).
+	 */
+	registerFragmentainers(root: HTMLElement | Node): void {
+		if (root instanceof HTMLElement && this.isMulticolElement(root)) {
+			this.registerFragmentainer(root);
+		}
+		if (!this.multicolSelectors.size) {
+			return;
+		}
+		for (const selector of this.multicolSelectors) {
+			let matches: NodeListOf<Element> | null = null;
+			try {
+				matches = (root as Element).querySelectorAll(selector);
+			} catch {
+				matches = null;
+			}
+			if (!matches) {
+				continue;
+			}
+			for (const match of matches) {
+				if (this.isMulticolElement(match)) {
+					this.registerFragmentainer(match);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Registers one fragmentainer unless it sits inside an already
+	 * registered one; nested multicol is degraded to a single column with a
+	 * warning instead of being registered.
+	 */
+	private registerFragmentainer(el: Element): void {
+		if (this.fragmentainers.has(el)) {
+			return;
+		}
+		let ancestor: Node | null = el.parentNode;
+		let nested = false;
+		while (ancestor && ancestor.nodeType === 1) {
+			const ancestorEl = ancestor as HTMLElement;
+			if (
+				ancestorEl.classList.contains("paged_page_content") ||
+				ancestorEl.classList.contains("paged_footnote_inner_content")
+			) {
+				break;
+			}
+			if (this.fragmentainers.has(ancestorEl)) {
+				nested = true;
+				break;
+			}
+			ancestor = ancestorEl.parentNode;
+		}
+		if (nested) {
+			console.warn(
+				"paged-with-floats: nested multi-column containers are not supported; rendering the inner container as a single column.",
+			);
+			(el as HTMLElement).style.columnCount = "1";
+			this.fragmentainerMeta.set(el, {
+				count: 1,
+				gap: 0,
+				columnWidth: el.getBoundingClientRect().width,
+			});
+			return;
+		}
+		this.fragmentainers.add(el);
+	}
+
+	/**
+	 * The registered fragmentainer containing `node`, if any; the climb
+	 * stops at the active element, the page content area, or the footnote
+	 * area's inner content.
+	 */
+	getFragmentainer(node: Node): Element | null {
+		let current: Node | null = isElement(node)
+			? (node as Node)
+			: (node.parentElement as Node | null);
+		while (current && current.nodeType === 1) {
+			const el = current as HTMLElement;
+			if (
+				current === this.element ||
+				el.classList.contains("paged_page_content") ||
+				el.classList.contains("paged_footnote_inner_content")
+			) {
+				return null;
+			}
+			if (this.fragmentainers.has(current as Element)) {
+				return current as Element;
+			}
+			current = el.parentNode as Node | null;
+		}
+		return null;
+	}
+
+	/**
+	 * The deepest trailing non-whitespace text node of `element`, following
+	 * last-child chains; undefined when the element ends without text
+	 * content (e.g. in a BR or an empty inline tail).
+	 */
+	private deepestTrailingText(element: Element): Text | undefined {
+		let node: Node | null = element;
+		while (node) {
+			let childNode: Node | null = node.lastChild;
+			while (childNode && isIgnorable(childNode)) {
+				childNode = childNode.previousSibling;
+			}
+			if (!childNode) {
+				return undefined;
+			}
+			if (isText(childNode)) {
+				if ((childNode.textContent || "").trim().length) {
+					return childNode as Text;
+				}
+				return undefined;
+			}
+			node = childNode;
+		}
+		return undefined;
+	}
+
+	/**
+	 * The single overflow predicate: without a fragmentainer the rect is
+	 * checked against the bounds (plus `additions` vertically); with one,
+	 * hidden spill-over columns and the last visible column's bottom edge
+	 * decide.
+	 */
+	rectOverflows(
+		rect: DOMRect,
+		additions: number,
+		frag: Element | null,
+		bounds: DOMRect = this.bounds,
+	): boolean {
+		if (!frag) {
+			return (
+				rect.right > bounds.right + COLUMN_EPSILON ||
+				rect.bottom > bounds.bottom + additions + COLUMN_EPSILON
+			);
+		}
+		const meta = this.getFragmentainerMeta(frag);
+		const box = this.fragmentainerBox(frag);
+		if (rect.left >= box.right + meta.gap - COLUMN_EPSILON) {
+			return true;
+		}
+		if (meta.count > 1) {
+			const colIndex = Math.floor(
+				(rect.left - box.left + COLUMN_EPSILON) /
+					(meta.columnWidth + meta.gap),
+			);
+			if (colIndex >= meta.count - 1) {
+				return (
+					rect.bottom > box.bottom + additions + COLUMN_EPSILON &&
+					rect.left < box.right + COLUMN_EPSILON
+				);
+			}
+			return false;
+		}
+		return rect.bottom > box.bottom + additions + COLUMN_EPSILON;
+	}
+
+	/**
+	 * Constrains a multicol block to the remaining vertical space so the
+	 * browser fragments it internally instead of balancing past the bottom
+	 * edge. Silent no-op when the block fits or has no measurable box.
+	 */
+	constrainMulticolHeight(el: Element, bounds: DOMRect = this.bounds): void {
+		const box = this.fragmentainerBox(el);
+		if (box.bottom - box.top === 0 || box.bottom <= bounds.bottom + COLUMN_EPSILON) {
+			return;
+		}
+		const available = Math.floor(bounds.bottom - box.top);
+		if (available <= 0) {
+			return;
+		}
+		(el as HTMLElement).style.columnFill = "auto";
+		(el as HTMLElement).style.height = available + "px";
+		(el as HTMLElement).dataset.pagedFragmentainerConstrained = "true";
+		this.fragmentainerMeta.delete(el);
+		this.invalidateBounds();
+	}
+
+	/**
+	 * The containers to fill, in order: the newest column segment's boxes,
+	 * or the flow host itself on a single-column page.
 	 */
 	flowColumns(wrapper: HTMLElement): HTMLElement[] {
-		const rows = wrapper.querySelectorAll(":scope > .paged_columns");
-		const row = rows.length ? rows[rows.length - 1] : null;
-		if (row) {
-			const columns = row.querySelectorAll(":scope > .paged_column");
-			return Array.from(columns) as HTMLElement[];
+		const rows = wrapper.querySelectorAll<HTMLElement>(
+			":scope > .paged_columns",
+		);
+		if (rows.length) {
+			const lastRow = rows[rows.length - 1];
+			return Array.from(
+				lastRow.querySelectorAll<HTMLElement>(":scope > .paged_column"),
+			);
 		}
 		return [wrapper];
 	}
 
 	/**
-	 * Starts a new column segment below a `column-span: all` element.
-	 *
-	 * The spanning element has already been appended to the flow host; this
-	 * adds a fresh row of column boxes for the content that follows, which
-	 * continues as a new set of columns (column 0 again), mirroring CSS
-	 * multicol's span semantics.
-	 *
-	 * @param {HTMLElement} wrapper - The flow host.
-	 * @returns {HTMLElement[]} The new segment's column boxes.
+	 * Moves the fill to the next column: activates it, rebuilds the current
+	 * overflow into it, and clears any overflow tagging that crossed the
+	 * column boundary.
 	 */
-	private startSpanRow(wrapper: HTMLElement): HTMLElement[] {
-		const rootColumns = this.settings.rootColumns as
-			| { count: number; gap?: string; fill?: "auto" | "balance"; ruleColor?: string; ruleStyle?: string; ruleWidth?: string }
-			| undefined;
-		const count =
-			rootColumns && rootColumns.count > 1
-				? Math.floor(rootColumns.count)
-				: 1;
-		if (count <= 1) {
-			return [wrapper];
-		}
-		const config = rootColumns as { gap?: string; fill?: "auto" | "balance"; ruleColor?: string; ruleStyle?: string; ruleWidth?: string };
-		const gap =
-			config.gap !== undefined && config.gap !== "normal"
-				? config.gap
-				: "1em";
-		const fill = config.fill || "balance";
-		const row = document.createElement("div");
-		row.classList.add("paged_columns");
-		row.style.gap = gap;
-		row.dataset.pagedColumnFill = fill;
-		for (let i = 0; i < count; i++) {
-			const column = document.createElement("div");
-			column.classList.add("paged_column");
-			column.dataset.pagedColumn = String(i);
-			column.style.width = `calc((100% - ${count - 1} * ${gap}) / ${count})`;
-			if (i > 0 && config.ruleWidth) {
-				column.style.borderLeft =
-					`${config.ruleWidth} ${config.ruleStyle || "solid"}` +
-					(config.ruleColor ? ` ${config.ruleColor}` : "");
-			}
-			row.appendChild(column);
-		}
-		wrapper.appendChild(row);
-		return Array.from(
-			row.querySelectorAll(":scope > .paged_column"),
-		) as HTMLElement[];
+	private advanceColumn(
+		columns: HTMLElement[],
+		colIndex: number,
+		token: BreakToken,
+		prevPage: HTMLElement | null,
+		source?: DocumentFragment | Node,
+	): HTMLElement {
+		const next = columns[colIndex + 1];
+		this.setActiveColumn(next);
+		this.addOverflowToPage(next, token, prevPage || undefined, source);
+		this.clearOverflowTags(next);
+		this.registerFragmentainers(next);
+		return next;
 	}
 
 	/**
-	 * Whether a source node carries `column-span: all` and therefore breaks
-	 * the current column segment into a full-width row.
-	 *
-	 * @param {Node|null} node - The source node.
-	 * @returns {boolean} True when the node spans all columns.
+	 * Removes the overflow-detection markers from `dest` and its subtree:
+	 * every column starts its fill with a clean slate.
 	 */
-	private isColumnSpan(node: Node | null | undefined): boolean {
-		if (!node || !(node instanceof HTMLElement)) {
-			return false;
+	private clearOverflowTags(dest: HTMLElement): void {
+		delete dest.dataset.overflowTagged;
+		delete dest.dataset.rangeStartOverflow;
+		delete dest.dataset.rangeEndOverflow;
+		const tagged = dest.querySelectorAll(
+			"[data-overflow-tagged], [data-range-start-overflow], [data-range-end-overflow]",
+		);
+		for (const el of tagged) {
+			delete (el as HTMLElement).dataset.overflowTagged;
+			delete (el as HTMLElement).dataset.rangeStartOverflow;
+			delete (el as HTMLElement).dataset.rangeEndOverflow;
 		}
-		// Author CSS `column-span: all` (tracked by the Columns handler)
-		// decides; computed style on detached source nodes is unreliable.
-		for (const selector of this.columnSpanSelectors) {
-			try {
-				if (node.matches(selector)) {
-					return true;
+	}
+
+	/**
+	 * The node a page's walk starts from: the incoming token's node, the
+	 * source's first child, or undefined when the flow is finished.
+	 */
+	getStart(
+		source: DocumentFragment | Node,
+		breakToken?: BreakToken,
+	): Node | undefined {
+		if (breakToken && breakToken.finished) {
+			return undefined;
+		}
+		if (breakToken && breakToken.node) {
+			return breakToken.node;
+		}
+		return (source.firstChild as Node) || undefined;
+	}
+
+	/**
+	 * Whether the node demands a hard break before it renders: a break
+	 * before of its own (suppressing the duplicate when the parent demands
+	 * the same break), a previous sibling's break-after, or a named-page
+	 * change.
+	 */
+	shouldBreak(node: Node, limiter?: Node): boolean {
+		if (needsBreakBefore(node)) {
+			let doubleBreakBefore = false;
+			if (node.parentNode && !nodeBefore(node, limiter)) {
+				const parent = node.parentNode as HTMLElement;
+				if (needsBreakBefore(parent)) {
+					doubleBreakBefore =
+						(node as HTMLElement).dataset.breakBefore ===
+						parent.dataset.breakBefore;
 				}
-			} catch {
-				// ignore invalid selectors
+			}
+			if (!doubleBreakBefore) {
+				return true;
+			}
+		}
+		if (needsPreviousBreakAfter(node)) {
+			return true;
+		}
+		return needsPageBreak(node, nodeBefore(node, limiter) as Node);
+	}
+
+	/**
+	 * Builds a BreakToken at `node`. Note the offset lands in BreakToken's
+	 * overflow-array slot; only the falsy `0` is ever passed (a fresh empty
+	 * array). The onBreakToken hook may replace the token.
+	 */
+	breakAt(
+		node: Node | undefined,
+		offset = 0,
+		forcedBreakQueue: Node[] = [],
+	): BreakToken {
+		let newBreakToken = new (BreakToken as unknown as {
+			new (node: Node, overflowArray?: unknown): BreakToken;
+		})(node as Node, offset);
+		if (forcedBreakQueue.length) {
+			newBreakToken.setForcedBreakQueue(forcedBreakQueue.slice());
+		}
+		const results = this.hooks.onBreakToken.triggerSync(
+			newBreakToken,
+			undefined,
+			node as HTMLElement | undefined,
+			this,
+		);
+		for (const result of results) {
+			if (result !== undefined) {
+				newBreakToken = result as BreakToken;
+			}
+		}
+		return newBreakToken;
+	}
+
+	/**
+	 * Whether a token must end the page rather than advance a column: a
+	 * queued forced break, a side break, or a page/always break on the token
+	 * node.
+	 */
+	private isForcedBreakToken(token: BreakToken): boolean {
+		if (token.getForcedBreakQueue().length) {
+			return true;
+		}
+		if (this.sideBreakValue(token.node)) {
+			return true;
+		}
+		const el = token.node as HTMLElement;
+		if (el && el.dataset) {
+			if (
+				el.dataset.breakBefore === "page" ||
+				el.dataset.breakBefore === "always"
+			) {
+				return true;
+			}
+			if (
+				el.dataset.previousBreakAfter === "page" ||
+				el.dataset.previousBreakAfter === "always"
+			) {
+				return true;
 			}
 		}
 		return false;
 	}
 
 	/**
-	 * Adds a `column-span: all` element as a full-width row and opens a new
-	 * column segment below it.
-	 *
-	 * @param {HTMLElement} wrapper - The flow host.
-	 * @param {Node} node - The spanning source node.
-	 * @param {Node|DocumentFragment} source - The source content.
-	 * @param {BreakToken|undefined} breakToken - Current break token.
-	 * @returns {HTMLElement[]} The new segment's column boxes.
+	 * The node's side break requirement (left/right/recto/verso), if any.
+	 */
+	private sideBreakValue(node: Node | null | undefined): string | null {
+		const el = node as HTMLElement;
+		if (el && el.dataset) {
+			const before = el.dataset.breakBefore;
+			if (before && SIDEBREAK_VALUES.indexOf(before) !== -1) {
+				return before;
+			}
+			const after = el.dataset.previousBreakAfter;
+			if (after && SIDEBREAK_VALUES.indexOf(after) !== -1) {
+				return after;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Whether the node demands a column break.
+	 */
+	private needsColumnBreak(node: Node): boolean {
+		const el = node as HTMLElement;
+		return (
+			el.dataset?.breakBefore === "column" ||
+			el.dataset?.previousBreakAfter === "column"
+		);
+	}
+
+	/**
+	 * Whether a manual column holds anything: any element child, or a text
+	 * child with trimmed content.
+	 */
+	private columnHasContent(column: HTMLElement): boolean {
+		for (const childNode of Array.from(column.childNodes)) {
+			if (isElement(childNode)) {
+				return true;
+			}
+			if (isText(childNode) && (childNode.textContent || "").trim().length) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Inert escape hatch: sets the force-render-break flag, which nothing in
+	 * this module reads.
+	 */
+	forceBreak(): void {
+		this.forceRenderBreak = true;
+	}
+
+	/**
+	 * Clones `node` into the page's flow: into its rendered parent's
+	 * counterpart when present, rebuilding the ancestor chain when not, or
+	 * directly into `dest` when the node has no element parent. The
+	 * renderNode hook may replace the clone.
+	 */
+	append(
+		node: Node,
+		dest: HTMLElement,
+		source: DocumentFragment | Node,
+		breakToken: BreakToken | null | undefined,
+		shallow = true,
+		rebuild = true,
+	): ChildNode {
+		let clone = cloneNode(node, !shallow) as ChildNode;
+		if (node.parentNode && isElement(node.parentNode)) {
+			const parent = findElement(node.parentNode, dest as WithRefs);
+			if (parent) {
+				replaceOrAppendElement(parent as HTMLElement, clone);
+			} else if (rebuild) {
+				const fragment = rebuildTree(
+					node.parentElement as Element,
+					undefined,
+					source as Element,
+				);
+				const fragmentParent = findElement(
+					node.parentElement as Element,
+					fragment as unknown as WithRefs,
+				) as HTMLElement;
+				if (fragmentParent) {
+					replaceOrAppendElement(fragmentParent, clone);
+				}
+				dest.appendChild(fragment);
+			} else {
+				dest.appendChild(clone);
+			}
+		} else {
+			dest.appendChild(clone);
+		}
+		const ref = (clone as Element).getAttribute
+			? (clone as Element).getAttribute("data-ref")
+			: null;
+		if (ref) {
+			const refs =
+				(dest as WithRefs).indexOfRefs ||
+				((dest as WithRefs).indexOfRefs = {});
+			refs[ref] = clone as HTMLElement;
+		}
+		const results = this.hooks.renderNode.triggerSync(clone, node, this);
+		for (const result of results) {
+			if (result !== undefined) {
+				clone = result as ChildNode;
+			}
+		}
+		this.invalidateBounds();
+		return clone;
+	}
+
+	/**
+	 * Merges the children of `source` into `dest`: text children are moved,
+	 * element children recurse into their rendered counterpart or are
+	 * appended.
+	 */
+	addOverflowNodes(dest: HTMLElement, source: Node): void {
+		for (const item of Array.from(source.childNodes)) {
+			if (isText(item)) {
+				dest.append(item);
+			} else {
+				const existing = findElement(item as Element, dest as WithRefs);
+				if (existing) {
+					this.addOverflowNodes(existing as HTMLElement, item);
+				} else {
+					dest.appendChild(item);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Rebuilds the previous page's carried overflow into `dest`: entries are
+	 * sorted into source document order, chained into one fragment, tagged
+	 * for detection, reordered, and appended; carried page floats are
+	 * re-fired through renderNode.
+	 */
+	addOverflowToPage(
+		dest: HTMLElement,
+		breakToken: BreakToken | undefined,
+		alreadyRendered?: DocumentFragment | Node,
+		source?: DocumentFragment | Node,
+	): void {
+		if (!dest) {
+			console.warn(
+				"paged-with-floats: addOverflowToPage called with null dest",
+				new Error().stack,
+			);
+			return;
+		}
+		if (!breakToken || !breakToken.overflow || !breakToken.overflow.length) {
+			return;
+		}
+		const overflows = Array.from(breakToken.overflow);
+		overflows.sort((a, b) =>
+			this.compareOverflowPositions(a, b, source),
+		);
+		let fragment: DocumentFragment | undefined;
+		for (const overflow of overflows) {
+			if (!overflow.content) {
+				continue;
+			}
+			fragment = rebuildTree(
+				overflow.node,
+				fragment,
+				alreadyRendered as Element | undefined,
+			);
+			const addTo = overflow.ancestor
+				? findElement(overflow.ancestor, fragment as unknown as WithRefs)
+				: fragment;
+			this.addOverflowNodes(addTo as HTMLElement, overflow.content);
+		}
+		if (fragment) {
+			for (const el of fragment.querySelectorAll("[data-ref]")) {
+				const ref = el.getAttribute("data-ref");
+				if (ref && !dest.querySelector("[data-ref='" + ref + "']")) {
+					const refs =
+						(dest as WithRefs).indexOfRefs ||
+						((dest as WithRefs).indexOfRefs = {});
+					refs[ref] = el as HTMLElement;
+				}
+			}
+			for (const tag of [
+				"overflow-tagged",
+				"overflow-partial",
+				"range-start-overflow",
+				"range-end-overflow",
+			]) {
+				const camel = tag.replace(/-([a-z])/g, (match, letter: string) =>
+					letter.toUpperCase(),
+				);
+				const tagged = fragment.querySelectorAll("[data-" + tag + "]");
+				for (const el of tagged) {
+					delete (el as HTMLElement).dataset[camel];
+				}
+			}
+			this.reorderBySourceOrder(fragment, source);
+			dest.appendChild(fragment);
+			const floats = fragment.querySelectorAll("[data-page-float]");
+			for (const el of floats) {
+				if ((el as HTMLElement).dataset && !(el as HTMLElement).dataset.pageFloatPlaced) {
+					this.hooks.renderNode.triggerSync(el, el, this);
+				}
+			}
+			this.hooks.afterOverflowAdded.trigger(dest);
+		}
+		this.invalidateBounds();
+	}
+
+	/**
+	 * Maps a (possibly detached) overflow node to its position in the source
+	 * tree for sorting: a connected node maps to itself, a detached one to
+	 * its element's data-ref counterpart.
+	 */
+	private sourceOf(
+		node: Node,
+		source?: DocumentFragment | Node,
+	): Node {
+		if (node.isConnected) {
+			return node;
+		}
+		try {
+			const probe = isElement(node) ? node : node.parentElement;
+			if (probe) {
+				const found = findElement(probe, source as WithRefs);
+				if (found) {
+					return found;
+				}
+			}
+		} catch {
+			// lookup errors fall back to the node itself
+		}
+		return node;
+	}
+
+	/**
+	 * Document-order comparator for overflow entries: same node sorts by
+	 * offset, different nodes by their source positions (comparison errors
+	 * leave the original order).
+	 */
+	private compareOverflowPositions(
+		a: Overflow,
+		b: Overflow,
+		source?: DocumentFragment | Node,
+	): number {
+		if (a.node === b.node) {
+			return (a.offset || 0) - (b.offset || 0);
+		}
+		const sourceA = this.sourceOf(a.node, source);
+		const sourceB = this.sourceOf(b.node, source);
+		if (!sourceA || !sourceB) {
+			return 0;
+		}
+		try {
+			const position = sourceA.compareDocumentPosition(sourceB);
+			if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
+				return -1;
+			}
+			if (position & Node.DOCUMENT_POSITION_PRECEDING) {
+				return 1;
+			}
+		} catch {
+			// cross-document comparison errors leave the original order
+		}
+		return 0;
+	}
+
+	/**
+	 * Re-orders children of containers inside a rebuilt overflow fragment so
+	 * they follow source document order. Only pure element sequences with
+	 * refs are touched; text-containing containers are left alone.
+	 */
+	private reorderBySourceOrder(
+		fragment: DocumentFragment,
+		source?: DocumentFragment | Node,
+	): void {
+		const containers: (Element | DocumentFragment)[] = [
+			fragment,
+			...Array.from(fragment.querySelectorAll("*")),
+		];
+		for (const container of containers) {
+			if ((container as Element).closest?.("table")) {
+				continue;
+			}
+			const elementChildren = Array.from(
+				(container as Element).children || [],
+			) as Element[];
+			if (elementChildren.length < 2) {
+				continue;
+			}
+			let hasTextChild = false;
+			for (const childNode of Array.from(container.childNodes)) {
+				if (
+					childNode.nodeType === 3 &&
+					(childNode.textContent || "").trim().length
+				) {
+					hasTextChild = true;
+					break;
+				}
+			}
+			if (hasTextChild) {
+				continue;
+			}
+			if (!elementChildren.every((el) => el.getAttribute("data-ref"))) {
+				continue;
+			}
+			const sourceNodes = elementChildren.map((el) =>
+				findElement(el, source as WithRefs),
+			);
+			if (sourceNodes.some((node) => !node)) {
+				continue;
+			}
+			const paths = sourceNodes.map((node) =>
+				this.sourceIndexPath(node as Element),
+			);
+			if (paths.some((path) => path === null)) {
+				continue;
+			}
+			const comparablePaths = paths as number[][];
+			let outOfOrder = false;
+			for (let i = 1; i < comparablePaths.length; i++) {
+				if (
+					compareSourcePaths(comparablePaths[i - 1], comparablePaths[i]) > 0
+				) {
+					outOfOrder = true;
+					break;
+				}
+			}
+			if (!outOfOrder) {
+				continue;
+			}
+			const order = elementChildren
+				.map((el, i) => i)
+				.sort(
+					(ia, ib) =>
+						compareSourcePaths(
+							comparablePaths[ia],
+							comparablePaths[ib],
+						),
+				);
+			for (const i of order) {
+				(container as Element).appendChild(elementChildren[i]);
+			}
+		}
+	}
+
+	/**
+	 * A node's source index path: its element-child index at each ancestor
+	 * level, root first. A -1 aborts to null.
+	 */
+	private sourceIndexPath(node: Node): number[] | null {
+		const path: number[] = [];
+		let current: Node | null = node;
+		while (current) {
+			const parent: Node | null = current.parentNode;
+			if (!parent || parent.nodeType !== 1) {
+				break;
+			}
+			const index = Array.prototype.indexOf.call(
+				(parent as Element).children,
+				current,
+			);
+			if (index === -1) {
+				return null;
+			}
+			path.unshift(index);
+			current = parent;
+		}
+		return path;
+	}
+
+	/**
+	 * Restores the table cells that follow the break token's cell: the
+	 * browser may have pulled them into the previous fragment's column span.
+	 */
+	rebuildTableFromBreakToken(
+		breakToken: BreakToken | undefined,
+		dest: HTMLElement,
+		source: DocumentFragment | Node,
+	): void {
+		const node = breakToken ? breakToken.node : undefined;
+		if (!node) {
+			return;
+		}
+		const probe = (isElement(node) ? node : node.parentElement) as Element;
+		if (!probe || typeof probe.closest !== "function") {
+			return;
+		}
+		const td = probe.closest("td");
+		if (!td) {
+			return;
+		}
+		const renderedTd = findElement(td, dest as WithRefs, true);
+		if (!renderedTd) {
+			return;
+		}
+		let sibling = td.nextElementSibling;
+		while (sibling) {
+			if (sibling.nodeName !== "TD") {
+				break;
+			}
+			this.append(sibling, dest, source, null, true);
+			sibling = sibling.nextElementSibling;
+		}
+	}
+
+	/**
+	 * Recursion over the rendered tree's last-element-child chain: prunes
+	 * emptied overflow-tagged elements (they will be re-added on the next
+	 * page) and registers surviving refs.
+	 */
+	lastChildCheck(parentElement: Element, rootElement: WithRefs): void {
+		const lastElementChild = parentElement.lastElementChild;
+		if (lastElementChild) {
+			this.lastChildCheck(lastElementChild, rootElement);
+		}
+		const refId = parentElement.getAttribute("data-ref");
+		if ((parentElement as HTMLElement).dataset?.overflowTagged) {
+			if (!(parentElement.textContent || "").trim().length) {
+				if (parentElement.parentElement) {
+					parentElement.parentElement.removeChild(parentElement);
+				}
+			}
+		} else if (refId) {
+			if (!rootElement.indexOfRefs) {
+				rootElement.indexOfRefs = {};
+			}
+			if (!rootElement.indexOfRefs[refId]) {
+				rootElement.indexOfRefs[refId] = parentElement as HTMLElement;
+			}
+		}
+	}
+
+	/**
+	 * First ancestor (the starting node included) whose
+	 * data-original-break-inside is exactly "avoid"; the climb stops at the
+	 * limiter.
+	 */
+	avoidBreakInside(node: Node, limiter: Node): Element | undefined {
+		let current: Node | null = node;
+		while (current) {
+			if (limiter && current === limiter) {
+				return undefined;
+			}
+			if (
+				isElement(current) &&
+				(current as HTMLElement).dataset?.originalBreakInside === "avoid"
+			) {
+				return current as Element;
+			}
+			current = current.parentNode;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Cheap scroll-size based overflow probe for the given element against
+	 * the bounds, including a scan of registered fragmentainers whose
+	 * internal spill does not grow the wrapper.
+	 */
+	hasOverflow(element: HTMLElement, bounds: DOMRect = this.bounds): boolean {
+		const parent = element.parentNode as Element | null;
+		let constrainingElement: Element = parent || element;
+		if (parent) {
+			if (
+				parent.classList.contains("paged_page_content") ||
+				parent.classList.contains("paged_columns")
+			) {
+				constrainingElement = element;
+			}
+		}
+		const elementRect = element.getBoundingClientRect();
+		if (
+			Math.max(
+				Math.ceil(elementRect.width),
+				(constrainingElement as HTMLElement).scrollWidth,
+			) > Math.ceil(bounds.width) ||
+			Math.max(
+				Math.ceil(elementRect.height),
+				(constrainingElement as HTMLElement).scrollHeight,
+			) > Math.ceil(bounds.height)
+		) {
+			return true;
+		}
+		for (const frag of this.fragmentainers) {
+			if (frag === element || frag === constrainingElement) {
+				continue;
+			}
+			const fragRect = frag.getBoundingClientRect();
+			if (
+				(frag as HTMLElement).scrollWidth >
+					Math.ceil(fragRect.width) + COLUMN_EPSILON ||
+				(frag as HTMLElement).scrollHeight >
+					Math.ceil(fragRect.height) + COLUMN_EPSILON
+			) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * The first child of `node` that overflows `bounds`. Null means
+	 * "overflowing children exist but were deliberately skipped" (range
+	 * markers); undefined means none.
+	 */
+	firstOverflowingChild(
+		node: Node,
+		bounds: DOMRect,
+	): ChildNode | null | undefined {
+		const bLeft = Math.ceil(bounds.left);
+		const bRight = Math.floor(bounds.right);
+		const bTop = Math.ceil(bounds.top);
+		const bBottom = Math.floor(bounds.bottom);
+		let parentBottomPaddingBorder = 0;
+		if (isElement(node)) {
+			const sums = this.getAncestorPaddingBorderAndMarginSums(
+				node as Element,
+			);
+			parentBottomPaddingBorder =
+				sums["padding-bottom"] + sums["border-bottom-width"];
+		}
+		const nodeFrag = this.getFragmentainer(node);
+		let skipRange = false;
+		let result: ChildNode | null | undefined = undefined;
+		for (const childNode of Array.from(node.childNodes)) {
+			if ((childNode as Element).nodeName === "COLGROUP") {
+				continue;
+			}
+			const pos = getBoundingClientRect(childNode as unknown as Element);
+			if (!pos) {
+				continue;
+			}
+			if (
+				isText(childNode) &&
+				!(childNode.textContent || "").trim().length &&
+				pos.height === 0 &&
+				pos.width === 0
+			) {
+				continue;
+			}
+			let bottomMargin = 0;
+			if (isElement(childNode)) {
+				const childEl = childNode as HTMLElement;
+				bottomMargin = parseFloat(getComputedStyle(childEl).marginBottom);
+				const startMarked = childEl.dataset.rangeStartOverflow !== undefined;
+				const endMarked = childEl.dataset.rangeEndOverflow !== undefined;
+				if (startMarked && endMarked) {
+					// collapsed pair — treated normally
+				} else if (startMarked) {
+					skipRange = true;
+					result = null;
+					continue;
+				} else if (endMarked) {
+					skipRange = false;
+					continue;
+				}
+				if (childEl.dataset.overflowTagged) {
+					continue;
+				}
+				if (skipRange) {
+					continue;
+				}
+			}
+			const isLastChild = indexOf(childNode) === node.childNodes.length - 1;
+			const bottom = Math.floor(
+				pos.bottom +
+					bottomMargin +
+					(isLastChild ? parentBottomPaddingBorder : 0),
+			);
+			if (!(pos.height + bottomMargin)) {
+				continue;
+			}
+			if (this.fragmentainers.has(childNode as Element)) {
+				const fragBox = this.fragmentainerBox(
+					childNode as unknown as Element,
+				);
+				if (
+					(childNode as HTMLElement).scrollWidth >
+						fragBox.right - fragBox.left + COLUMN_EPSILON ||
+					(childNode as HTMLElement).scrollHeight >
+						fragBox.bottom - fragBox.top + COLUMN_EPSILON
+				) {
+					return childNode;
+				}
+				continue;
+			}
+			if (nodeFrag) {
+				const rects = this.nodeClientRects(childNode);
+				const list: DOMRect[] =
+					rects && rects.length
+						? (Array.from(rects) as DOMRect[])
+						: [pos as DOMRect];
+				for (const rect of list) {
+					if (this.rectOverflows(rect, bottomMargin, nodeFrag, bounds)) {
+						return childNode;
+					}
+				}
+			} else if (
+				pos.left < bLeft ||
+				pos.right > bRight ||
+				pos.top < bTop ||
+				bottom > bBottom
+			) {
+				return childNode;
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * Whether the node itself spills past the bounds through its own
+	 * padding, margin or text: the intrinsic bottom-right point of its last
+	 * untagged child (its own rect for BR and text nodes) plus the summed
+	 * bottom padding/border/margin of its ancestor chain.
+	 */
+	private intrinsicOverflowPoint(node: Node, bounds: DOMRect): boolean {
+		let rect: DOMRect | undefined;
+		if (isText(node) || (isElement(node) && node.nodeName === "BR")) {
+			rect = getBoundingClientRect(node as Element) as DOMRect | undefined;
+		} else if (isElement(node)) {
+			let lastChild = node.lastChild;
+			while (
+				lastChild &&
+				isElement(lastChild) &&
+				(lastChild as HTMLElement).dataset?.overflowTagged
+			) {
+				lastChild = lastChild.previousSibling;
+			}
+			if (lastChild) {
+				rect = getBoundingClientRect(lastChild as Element) as DOMRect;
+			}
+		}
+		if (!rect) {
+			return false;
+		}
+		// Margins never hold content; only padding and borders of the
+		// ancestor chain can visually contain the node's tail.
+		const sums = this.getAncestorPaddingBorderAndMarginSums(
+			node.parentElement,
+			false,
+			true,
+		);
+		const additions =
+			sums["padding-bottom"] +
+			sums["border-bottom-width"];
+		const probeRect = new DOMRect(rect.right, rect.bottom, 0, 0);
+		return this.rectOverflows(
+			probeRect,
+			additions,
+			this.getFragmentainer(node),
+			bounds,
+		);
+	}
+
+	/**
+	 * The next untagged sibling of `node`, climbing parents; prev follows
+	 * the climb. Text siblings with visible content count too: the walk
+	 * must be able to reach the tail text that follows an inline sibling
+	 * (a footnote call, a moved note, a BR), or a paragraph's overflowing
+	 * last lines would never be visited. Returns null when the walk reaches
+	 * `topNode`, `rendered`, or exhausts.
+	 */
+	private nextUntaggedElementSibling(
+		node: Node,
+		topNode: Node,
+		rendered: HTMLElement,
+	): Node | null {
+		let climber: Node | null = node;
+		while (climber) {
+			let sibling = climber.nextSibling;
+			while (sibling) {
+				if (isElement(sibling)) {
+					if (!(sibling as HTMLElement).dataset?.overflowTagged) {
+						return sibling;
+					}
+				} else if (
+					isText(sibling) &&
+					(sibling.textContent || "").trim().length
+				) {
+					return sibling;
+				}
+				sibling = sibling.nextSibling;
+			}
+			if (climber === topNode || climber === rendered) {
+				return null;
+			}
+			climber = climber.parentNode;
+			if (!climber || climber === rendered || climber === topNode) {
+				return null;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Descends from `startNode` to the deepest node where the overflow
+	 * begins, advancing past fully-overflowed subtrees. Returns the node
+	 * before the overflowing node and whether any overflow was found.
+	 */
+	startOfNewOverflow(
+		startNode: Node,
+		rendered: HTMLElement,
+		bounds: DOMRect,
+	): [ChildNode | null | undefined, boolean] {
+		const topNode: Node = startNode;
+		let node: Node | null = startNode;
+		let prev: Node = startNode;
+		let done = false;
+		let anyOverflowFound = false;
+		while (!done && node) {
+			prev = node;
+			const childNode = this.firstOverflowingChild(node, bounds);
+			if (childNode) {
+				anyOverflowFound = true;
+				node = childNode;
+				continue;
+			}
+			if (childNode === null) {
+				const next = this.nextUntaggedElementSibling(node, topNode, rendered);
+				if (!next) {
+					return [null, anyOverflowFound];
+				}
+				node = next;
+				continue;
+			}
+if (this.intrinsicOverflowPoint(node, bounds)) {
+				done = true;
+				break;
+			}
+			const next = this.nextUntaggedElementSibling(node, topNode, rendered);
+			if (!next) {
+				return [null, anyOverflowFound];
+			}
+			node = next;
+		}
+		return [prev as ChildNode, anyOverflowFound];
+	}
+
+	/**
+	 * The entry point of overflow detection: returns the next overflow
+	 * Range, or undefined when nothing spills.
+	 */
+	findOverflow(
+		rendered: HTMLElement,
+		bounds: DOMRect,
+		source?: DocumentFragment | Node,
+	): Range | undefined {
+		if (!this.hasOverflow(rendered, bounds)) {
+			return undefined;
+		}
+		if (rendered.dataset.overflowTagged) {
+			return undefined;
+		}
+		let node: Node | null = rendered;
+		while (isText(node)) {
+			node = (node as Text).nextElementSibling;
+		}
+		if (!node) {
+			return undefined;
+		}
+		const [startOfOverflow, anyOverflowFound] = this.startOfNewOverflow(
+			node,
+			rendered,
+			bounds,
+		);
+		if (!anyOverflowFound || !startOfOverflow) {
+			return undefined;
+		}
+		if (
+			(isText(startOfOverflow) &&
+				(startOfOverflow.parentElement as HTMLElement)?.dataset
+					?.overflowTagged) ||
+			(isElement(startOfOverflow) &&
+				(startOfOverflow as HTMLElement).dataset?.overflowTagged)
+		) {
+			return undefined;
+		}
+		let rangeStart: Node = startOfOverflow;
+		let check: Node = startOfOverflow;
+		node = startOfOverflow;
+		let visibleSiblings = false;
+		let rangeEnd: Node | null | undefined = rendered.lastElementChild;
+		do {
+			if (
+				isElement(check) &&
+				(check.classList.contains("region-content") ||
+					check.classList.contains("paged_page_content"))
+			) {
+				break;
+			}
+			const checkBounds = getBoundingClientRect(
+				check as Element,
+			) as DOMRect;
+			const overflows = this.rectOverflows(
+				checkBounds,
+				0,
+				this.getFragmentainer(check),
+				bounds,
+			);
+			if (overflows) {
+				const rowBreakAt = this.tableRowNeedsBreakAt(check, rendered, bounds);
+				if (rowBreakAt) {
+					if (rowBreakAt.nodeName === "TABLE") {
+						rangeEnd = rowBreakAt;
+					} else {
+						rangeStart = rowBreakAt;
+					}
+					break;
+				}
+				const avoidEl = this.avoidBreakInside(check, rendered);
+				if (avoidEl) {
+					const rowspanBreakAt = this.rowspanNeedsBreakAt(
+						(avoidEl.closest("tr") || check) as Element,
+						rendered,
+					);
+					if (rowspanBreakAt) {
+						rangeStart = rowspanBreakAt;
+						rangeEnd = rendered.lastChild;
+						break;
+					}
+					// Move the avoid block whole: the break goes before it, so
+					// the fit test is the block's own height against a fresh
+					// page's space, not the deep overflowing node's.
+					const avoidRect = avoidEl.getBoundingClientRect();
+					const width = avoidRect.width > bounds.width
+						? this.getUnconstrainedElementHeight(avoidEl)
+						: avoidRect.height;
+					const mustSplit = width > bounds.height;
+					if (!mustSplit) {
+						rangeStart = avoidEl;
+						break;
+					}
+				}
+				let sibling = check.nextSibling;
+				while (sibling) {
+					const siblingRect = getBoundingClientRect(
+						sibling as Element,
+					) as DOMRect | undefined;
+					if (siblingRect && siblingRect.height > 0) {
+						break;
+					}
+					sibling = sibling.nextSibling;
+				}
+				if (sibling) {
+					const siblingRect = getBoundingClientRect(
+						sibling as Element,
+					) as DOMRect;
+					const frag = this.getFragmentainer(check);
+					const startsBeyond = this.rectOverflows(
+						new DOMRect(siblingRect.left, siblingRect.top, siblingRect.width, 0),
+						0,
+						frag,
+						bounds,
+					);
+					const endsBeyond = this.rectOverflows(
+						new DOMRect(siblingRect.left, siblingRect.bottom, siblingRect.width, 0),
+						0,
+						frag,
+						bounds,
+					);
+					if (startsBeyond || endsBeyond) {
+						if (!visibleSiblings) {
+							rangeEnd = check.parentElement
+								? check.parentElement.lastChild
+								: rangeEnd;
+						}
+					} else {
+						visibleSiblings = true;
+						rangeEnd = undefined;
+					}
+				}
+			}
+			const checkParent = check.parentElement;
+			if (checkParent) {
+				for (const childEl of Array.from(checkParent.children)) {
+					(childEl as unknown as { width?: string }).width =
+						getComputedStyle(childEl).width;
+				}
+			}
+			if (!checkParent) {
+				break;
+			}
+			check = checkParent;
+		} while (check && check !== rendered);
+		return this.tagAndCreateOverflowRange(
+			startOfOverflow,
+			rangeStart,
+			rangeEnd || undefined,
+			bounds,
+			rendered,
+		);
+	}
+
+	/**
+	 * Converts the chosen break nodes into a tagged Range: text starts get
+	 * their offset, avoid-pairs pull the start backwards, and the involved
+	 * elements are marked so re-detection finds only NEW overflow.
+	 */
+	tagAndCreateOverflowRange(
+		startOfOverflow: Node,
+		rangeStart: Node,
+		rangeEnd?: Node,
+		bounds?: DOMRect,
+		rendered?: HTMLElement,
+	): Range | undefined {
+		const boundsToUse = bounds || this.bounds;
+		const renderedRoot = rendered;
+		let start: number;
+		let end: number;
+		let vStart: number;
+		let vEnd: number;
+		const frag = this.getFragmentainer(rangeStart);
+		if (frag) {
+			const box = this.fragmentainerBox(frag);
+			start = box.left;
+			end = box.right;
+			vStart = box.top;
+			vEnd = box.bottom;
+		} else {
+			start = boundsToUse.left;
+			end = boundsToUse.right;
+			vStart = boundsToUse.top;
+			vEnd = boundsToUse.bottom;
+		}
+		let position: Node = rangeStart;
+		let offset: number | undefined = undefined;
+		if (isText(rangeStart) && (rangeStart.textContent || "").trim().length) {
+			offset = this.textBreak(rangeStart, start, end, vStart, vEnd);
+			if (offset === undefined) {
+				let climber: Node | null = rangeStart;
+				let advanced: Element | null = null;
+				while (climber && climber !== renderedRoot) {
+					if ((climber as Element).nextElementSibling) {
+						advanced = (climber as Element).nextElementSibling;
+						break;
+					}
+					climber = climber.parentNode;
+				}
+				if (!advanced) {
+					return undefined;
+				}
+				startOfOverflow = advanced;
+				rangeStart = advanced;
+				position = advanced;
+				offset = undefined;
+			}
+		}
+		for (;;) {
+			const carrier = isText(position)
+				? position.parentElement
+				: isElement(position)
+					? (position as HTMLElement)
+					: null;
+			if (!carrier) {
+				break;
+			}
+			const wantsAvoid =
+				carrier.dataset.previousBreakAfter === "avoid" ||
+				carrier.dataset.breakBefore === "avoid";
+			if (!wantsAvoid) {
+				break;
+			}
+			const previousElement = carrier.previousElementSibling;
+			if (!previousElement) {
+				break;
+			}
+			if (previousElement.dataset.splitFrom) {
+				break;
+			}
+			let before = nodeBefore(previousElement, renderedRoot, true);
+			if (!before) {
+				break;
+			}
+			// Position the break inside the previous element's trailing text
+			// when one exists: a tail that fits whole stays on this page (the
+			// text path advances to the next element when it fits), while a
+			// tail that crosses the edge splits at the measured line.
+			if (isElement(before)) {
+				const deepestText = this.deepestTrailingText(before as Element);
+				if (deepestText) {
+					before = deepestText;
+				}
+			}
+			position = before;
+			rangeStart = before;
+			startOfOverflow = before;
+			// The offset belonged to the pre-pull-back node: re-measure the
+			// pulled-back text so a tail that fits whole advances past it.
+			offset = undefined;
+		}
+		if (
+			isText(rangeStart) &&
+			(rangeStart.textContent || "").trim().length &&
+			offset === undefined
+		) {
+			const pulledOffset = this.textBreak(
+				rangeStart as Text,
+				start,
+				end,
+				vStart,
+				vEnd,
+			);
+			if (pulledOffset === undefined) {
+				let climber: Node | null = rangeStart;
+				let advanced: Element | null = null;
+				while (climber && climber !== renderedRoot) {
+					if ((climber as Element).nextElementSibling) {
+						advanced = (climber as Element).nextElementSibling;
+						break;
+					}
+					climber = climber.parentNode;
+				}
+				if (advanced) {
+					startOfOverflow = advanced;
+					rangeStart = advanced;
+					position = advanced;
+				}
+			} else {
+				offset = pulledOffset;
+			}
+		}
+		const range = this.getRange(rangeStart, (offset || 0) as number, rangeEnd);
+		if (isText(rangeStart)) {
+			const parent = rangeStart.parentElement;
+			if (parent) {
+				parent.setAttribute(
+					"data-split-to",
+					parent.getAttribute("data-ref") as string,
+				);
+				parent.dataset.rangeStartOverflow = "true";
+				parent.dataset.overflowTagged = "true";
+				position = parent;
+			}
+		} else if (isElement(rangeStart)) {
+			(rangeStart as HTMLElement).dataset.rangeStartOverflow = "true";
+		}
+		if (rangeEnd) {
+			if (isElement(rangeEnd)) {
+				const rangeEndEl = rangeEnd as HTMLElement;
+				const startParent = isText(rangeStart)
+					? rangeStart.parentElement
+					: isElement(rangeStart)
+						? (rangeStart as HTMLElement).parentElement
+						: null;
+				const endRef = rangeEndEl.getAttribute("data-ref");
+				const containsStart =
+					!!(startParent && endRef && startParent.closest("[data-ref='" + endRef + "']"));
+				if (containsStart) {
+					const after = nodeAfter(rangeEnd);
+					if (after) {
+						(after as HTMLElement).dataset.rangeEndOverflow = "true";
+						(after as HTMLElement).dataset.overflowTagged = "true";
+					} else {
+						rangeEndEl.dataset.rangeEndOverflow = "true";
+						rangeEndEl.dataset.overflowTagged = "true";
+					}
+				} else {
+					rangeEndEl.dataset.rangeEndOverflow = "true";
+					rangeEndEl.dataset.overflowTagged = "true";
+				}
+			} else if (isText(rangeEnd)) {
+				const parent = rangeEnd.parentElement;
+				if (parent) {
+					parent.dataset.rangeEndOverflow = "true";
+				}
+			}
+		}
+		let splitWalker: Node | null = position.parentNode;
+		while (splitWalker && splitWalker !== renderedRoot) {
+			if (isElement(splitWalker) && splitWalker.previousSibling) {
+				const el = splitWalker as HTMLElement;
+				el.setAttribute("data-split-to", el.getAttribute("data-ref") as string);
+			}
+			splitWalker = splitWalker.parentNode;
+		}
+		const commonAncestor = range.commonAncestorContainer;
+		let tagClimber: Node | null = position;
+		while (tagClimber) {
+			const parent: Node | null = tagClimber.parentNode;
+			if (!parent || parent === commonAncestor) {
+				break;
+			}
+			if (isElement(parent)) {
+				(parent as HTMLElement).dataset.overflowTagged = "true";
+			}
+			tagClimber = parent;
+		}
+		let startTop: Node | null = position;
+		while (startTop && startTop.parentNode !== commonAncestor) {
+			startTop = startTop.parentNode;
+		}
+		let endTop: Node | null = rangeEnd || null;
+		while (endTop && endTop.parentNode !== commonAncestor) {
+			endTop = endTop.parentNode;
+		}
+		if (startTop && startTop !== endTop) {
+			let sibling = startTop.nextSibling;
+			while (sibling && sibling !== endTop) {
+				if (isElement(sibling)) {
+					(sibling as HTMLElement).dataset.overflowTagged = "true";
+				}
+				sibling = sibling.nextSibling;
+			}
+			let lastClimber: Node | null = endTop || startTop;
+			while (lastClimber && lastClimber !== renderedRoot) {
+				if ((lastClimber as Element).nextElementSibling && isElement(lastClimber)) {
+					break;
+				}
+				if (isElement(lastClimber)) {
+					(lastClimber as HTMLElement).dataset.overflowTagged = "true";
+				}
+				const parent: Node | null = lastClimber.parentNode;
+				if (!parent || parent === commonAncestor || parent === renderedRoot) {
+					break;
+				}
+				lastClimber = parent;
+			}
+		}
+		return range;
+	}
+
+	/**
+	 * The client rectangles of a node: elements and ranges delegate to
+	 * getClientRects, other nodes are measured through a range.
+	 */
+	nodeClientRects(node: Node): DOMRectList | undefined {
+		return getClientRects(node as Element);
+	}
+
+	/**
+	 * Collects overflow ranges until detection is exhausted (guarded),
+	 * merges duplicates into already-collected ranges, and processes them
+	 * into a BreakToken; a residual sweep catches overflow created by the
+	 * extraction itself.
+	 */
+	findBreakToken(
+		rendered: HTMLElement,
+		source: DocumentFragment | Node,
+		bounds: DOMRect = this.bounds,
+		prevBreakToken?: BreakToken,
+		node: Node | null = null,
+		extract = true,
+	): BreakToken | undefined {
+		const collected: Range[] = [];
+		let iterations = 0;
+		let overflowResult = this.findOverflow(rendered, bounds, source);
+		while (overflowResult) {
+			if (iterations >= 100) {
+				console.error(
+					"paged-with-floats: overflow collection guard exceeded; bailing out.",
+				);
+				break;
+			}
+			iterations++;
+			let existing = false;
+			for (const item of collected) {
+				if (
+					item.startContainer === overflowResult.startContainer &&
+					item.endContainer === overflowResult.endContainer
+				) {
+					if (
+						item.startOffset >= overflowResult.startOffset &&
+						item.endOffset <= overflowResult.endOffset
+					) {
+						item.setStart(
+							overflowResult.startContainer,
+							overflowResult.startOffset,
+						);
+					} else if (
+						item.endOffset > overflowResult.endOffset &&
+						item.startOffset == overflowResult.startOffset
+					) {
+						item.setEnd(
+							overflowResult.endContainer,
+							overflowResult.endOffset,
+						);
+						(item as unknown as { EndOffset?: number }).EndOffset = (
+							overflowResult as unknown as { EndOffset?: number }
+						).EndOffset;
+					}
+					existing = true;
+					break;
+				}
+			}
+			if (!existing) {
+				collected.push(overflowResult);
+			}
+			overflowResult = this.findOverflow(rendered, bounds, source);
+		}
+		if (collected.length) {
+			const breakToken = this.processOverflowResult(
+				collected,
+				rendered,
+				source,
+				bounds,
+				prevBreakToken,
+				node,
+				extract,
+			);
+			if (breakToken && extract) {
+				this.extractResidualOverflow(
+					rendered,
+					bounds,
+					source,
+					breakToken,
+					prevBreakToken,
+				);
+			}
+			return breakToken;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Maps collected overflow ranges back to source resume positions,
+	 * extracts the overflowing content, and fires the overflow hooks.
+	 * Callers must tolerate an undefined-valued return when no range
+	 * produced a token.
+	 */
+	processOverflowResult(
+		ranges: Range[],
+		rendered: HTMLElement,
+		source: DocumentFragment | Node,
+		bounds: DOMRect,
+		prevBreakToken: BreakToken | undefined,
+		node: Node | null,
+		extract?: boolean,
+	): BreakToken {
+		let breakToken: BreakToken | undefined;
+		for (const originalRange of ranges) {
+			let overflowRange: Range = originalRange;
+			const onOverflowResults = this.hooks.onOverflow.triggerSync(
+				overflowRange,
+				rendered,
+				bounds,
+				this,
+			);
+			for (const result of onOverflowResults) {
+				if (result !== undefined) {
+					overflowRange = result as Range;
+				}
+			}
+			this.extendOverflowToWord(overflowRange);
+			const overflow = this.createOverflow(overflowRange, rendered, source);
+			if (!overflow) {
+				continue;
+			}
+			if (!breakToken) {
+				breakToken = new BreakToken(node as Node, [overflow]);
+			} else {
+				breakToken.overflow.push(overflow);
+			}
+			const onBreakTokenResults = this.hooks.onBreakToken.triggerSync(
+				breakToken,
+				overflowRange,
+				rendered,
+				this,
+			);
+			for (const result of onBreakTokenResults) {
+				if (result !== undefined) {
+					breakToken = result as BreakToken;
+				}
+			}
+			if (prevBreakToken && breakToken.equals(prevBreakToken)) {
+				continue;
+			}
+			let breakLetter: string | undefined;
+			if (
+				overflow.node &&
+				overflow.offset &&
+				(overflow.node as Text).textContent
+			) {
+				breakLetter = (overflow.node as Text).textContent[overflow.offset];
+			}
+			if (overflow.node && extract) {
+				overflow.ancestor = findElement(
+					overflow.range!.commonAncestorContainer,
+					source as WithRefs,
+				) as Element;
+				overflow.content = this.removeOverflow(overflowRange, breakLetter);
+			}
+		}
+		for (const range of ranges) {
+			void range;
+			this.lastChildCheck(rendered, rendered as WithRefs);
+		}
+		if (
+			(rendered as WithRefs).indexOfRefs &&
+			extract &&
+			breakToken &&
+			breakToken.overflow.length
+		) {
+			const first = breakToken.overflow[0];
+			if (first.content) {
+				for (const el of first.content.querySelectorAll("[data-ref]")) {
+					const ref = el.getAttribute("data-ref");
+					const renderedRefs = (rendered as WithRefs).indexOfRefs;
+					if (
+						ref &&
+						!rendered.querySelector("[data-ref='" + ref + "']") &&
+						renderedRefs
+					) {
+						delete renderedRefs[ref];
+					}
+				}
+			}
+		}
+		if (breakToken) {
+			for (const overflow of breakToken.overflow) {
+				this.hooks.afterOverflowRemoved.trigger(
+					overflow.content,
+					rendered,
+					this,
+				);
+			}
+		}
+		return breakToken as BreakToken;
+	}
+
+	/**
+	 * Maps a rendered overflow range back to a source resume position:
+	 * element anchors resolve through their rendered/source counterparts,
+	 * text anchors through the ordinal text-child mapping.
+	 */
+	createOverflow(
+		overflow: Range,
+		rendered: HTMLElement,
+		source: DocumentFragment | Node,
+	): Overflow | undefined {
+		const hyphen = (this.settings.hyphenGlyph as string) || "\u2011";
+		let node: Node | undefined;
+		let offset = 0;
+		let topLevel = false;
+		const startContainer = overflow.startContainer;
+		const startOffset = overflow.startOffset;
+		if (isElement(startContainer)) {
+			const container = startContainer;
+			let temp: Node | undefined;
+			if (container.nodeName === "INPUT") {
+				temp = container;
+			} else {
+				temp = child(container, startOffset);
+			}
+			if (temp && isElement(temp)) {
+				const renderedNode = findElement(temp as Element, rendered as WithRefs);
+				if (renderedNode) {
+					node = findElement(renderedNode, source as WithRefs) || undefined;
+					offset = 0;
+				} else {
+					let prev: Node | null = prevValidNode(temp);
+					if (!prev) {
+						return undefined;
+					}
+					const renderedPrev = findElement(prev, rendered as WithRefs);
+					if (!renderedPrev) {
+						return undefined;
+					}
+					const sourcePrev = findElement(renderedPrev, source as WithRefs);
+					if (!sourcePrev) {
+						return undefined;
+					}
+					if (!temp.nextSibling) {
+						const walker = document.createTreeWalker(
+							sourcePrev,
+							NodeFilter.SHOW_ELEMENT,
+						);
+						let lastElement = walker.lastChild();
+						while (lastElement) {
+							const deeper = walker.lastChild();
+							if (!deeper) {
+								break;
+							}
+							lastElement = deeper;
+						}
+						if (
+							lastElement &&
+							!findElement(lastElement, rendered as WithRefs)
+						) {
+							return undefined;
+						}
+					}
+					node = (sourcePrev.nextSibling as Node) || undefined;
+					offset = 0;
+				}
+			} else if (temp) {
+				if (container === rendered) {
+					node = source as Node;
+					topLevel = true;
+					const mapping = indexOfTextNodeForOverflow(
+						temp,
+						source as Element,
+						source as Element,
+						hyphen,
+					);
+					if (mapping.index === 0) {
+						node = source as Node;
+						offset = 0;
+					} else {
+						node = child(source as Node, mapping.index);
+						offset = 0;
+					}
+				} else {
+					const renderedNode =
+						findElement(container, rendered as WithRefs) ||
+						(() => {
+							const prev = prevValidNode(container);
+							return prev
+								? findElement(prev, rendered as WithRefs)
+								: undefined;
+						})();
+					if (!renderedNode) {
+						return undefined;
+					}
+					const parent = findElement(renderedNode, source as WithRefs);
+					if (!parent) {
+						return undefined;
+					}
+					const mapping = indexOfTextNodeForOverflow(
+						temp,
+						renderedNode as Element,
+						parent as Element,
+						hyphen,
+					);
+					if (mapping.index === 0) {
+						node = parent;
+						offset = 0;
+					} else {
+						node = child(parent, mapping.index);
+						offset = 0;
+					}
+				}
+			}
+		} else if (isText(startContainer)) {
+			const containerParent = startContainer.parentElement;
+			let renderedNode: Element | null | undefined = containerParent
+				? findElement(containerParent, rendered as WithRefs)
+				: undefined;
+			if (!renderedNode) {
+				const prev = prevValidNode(startContainer);
+				renderedNode = prev
+					? findElement(prev, rendered as WithRefs)
+					: undefined;
+			}
+			if (!renderedNode) {
+				return undefined;
+			}
+			const parent = findElement(renderedNode, source as WithRefs);
+			if (!parent) {
+				return undefined;
+			}
+			const mapping = indexOfTextNodeForOverflow(
+				startContainer,
+				renderedNode as Element,
+				parent as Element,
+				hyphen,
+			);
+			if (mapping.index === -1) {
+				node = parent;
+				offset = 0;
+			} else {
+				const sourceChild = child(parent, mapping.index);
+				node = sourceChild;
+				offset = sourceChild
+					? ((sourceChild.textContent || "").indexOf(
+							startContainer.textContent || "",
+						) || 0)
+					: 0;
+			}
+		}
+		if (!node) {
+			return undefined;
+		}
+		return new Overflow(
+			node,
+			offset,
+			overflow.getBoundingClientRect().height,
+			overflow,
+			topLevel,
+		);
+	}
+
+	/**
+	 * Builds a Range from a break position: a text start begins at the
+	 * character offset, an element start selects the node; the end always
+	 * sits after `rangeEnd` so following nodes are included.
+	 */
+	getRange(rangeStart: Node, offset: number, rangeEnd?: Node): Range {
+		const range = document.createRange();
+		if (isText(rangeStart)) {
+			range.setStart(rangeStart, offset);
+		} else {
+			range.selectNode(rangeStart);
+		}
+		range.setEndAfter(rangeEnd || rangeStart);
+		return range;
+	}
+
+	/**
+	 * Extracts the overflowing content from the page and hyphenates the kept
+	 * tail when the break lands mid-word.
+	 */
+	removeOverflow(overflow: Range, breakLetter?: string): DocumentFragment {
+		const extracted = overflow.extractContents();
+		this.hyphenateAtBreak(overflow.startContainer, breakLetter);
+		return extracted;
+	}
+
+	/**
+	 * Appends the engine's hyphen glyph to a text container whose kept tail
+	 * ends in a word character (or a soft hyphen), marking the parent and
+	 * recording the hyphenation event for the page.
+	 */
+	hyphenateAtBreak(startContainer: Node, breakLetter?: string): void {
+		if (isText(startContainer)) {
+			const text = startContainer.textContent || "";
+			const prevLetter = text.charAt(text.length - 1);
+			const passes = (value: string) => /^\w|\u00AD$/.test(value);
+			if (
+				(breakLetter && passes(prevLetter) && passes(breakLetter)) ||
+				(!breakLetter && passes(prevLetter))
+			) {
+				const glyph = (this.settings.hyphenGlyph as string) || "\u2011";
+				startContainer.parentElement?.classList.add("paged_hyphen");
+				startContainer.appendData(glyph);
+				recordHyphenationWarning(
+					this.element.closest(".paged_page")?.getAttribute("data-page-number") ||
+						undefined,
+				);
+			}
+		}
+		this.invalidateBounds();
+	}
+
+	/**
+	 * Pulls the range's start back to the beginning of a word: a
+	 * continuation fragment must carry at least one word of content.
+	 */
+	extendOverflowToWord(range: Range): void {
+		if ((range.toString() || "").trim().length) {
+			return;
+		}
+		let container: Node = range.startContainer;
+		let offset = range.startOffset;
+		if (!isText(container)) {
+			const previous = container.childNodes[offset - 1];
+			if (!previous) {
+				return;
+			}
+			container = previous;
+			offset = Number.MAX_SAFE_INTEGER;
+		}
+		let wordChars = 0;
+		let current: Node | null = container;
+		let currentOffset = offset;
+		for (let hops = 0; hops < 60; hops++) {
+			if (
+				isText(current) &&
+				!((current.parentElement as HTMLElement)?.dataset?.note === "footnote")
+			) {
+				const text = current.textContent || "";
+				const before = text.substring(0, Math.min(currentOffset, text.length));
+				const match = /(\S+)\s*$/.exec(before);
+				if (match) {
+					const word = match[1];
+					const wordWordChars = word.replace(/[^\w]/g, "").length;
+					if (wordWordChars + wordChars >= 2) {
+						range.setStart(current, before.length - word.length);
+						return;
+					}
+					wordChars += wordWordChars;
+				}
+			}
+			let prev: Node | null = current
+				? nodeBefore(current, undefined, false) || null
+				: null;
+			while (prev && !isText(prev)) {
+				prev = nodeBefore(prev, undefined, false) || null;
+			}
+			if (!prev) {
+				return;
+			}
+			current = prev;
+			currentOffset = (prev.textContent || "").length;
+		}
+	}
+
+	/**
+	 * Duck-typed token comparison used by handlers: missing fields are
+	 * skipped, present-and-different fields disagree.
+	 */
+	equalTokens(
+		a?: { node?: Node; offset?: number } | null,
+		b?: { node?: Node; offset?: number } | null,
+	): boolean {
+		if (!a || !b) {
+			return false;
+		}
+		if (a.node && b.node && a.node !== b.node) {
+			return false;
+		}
+		if (
+			a.offset !== undefined &&
+			b.offset !== undefined &&
+			a.offset !== b.offset
+		) {
+			return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Re-sweeps the page for overflow created by the extraction itself
+	 * (the kept text re-wraps); pushes any further overflow onto the token.
+	 */
+	private extractResidualOverflow(
+		rendered: HTMLElement,
+		bounds: DOMRect,
+		source: DocumentFragment | Node,
+		breakToken: BreakToken,
+		prevBreakToken: BreakToken | undefined,
+	): void {
+		if (!rendered.isConnected) {
+			return;
+		}
+		this.inResidualSweep = true;
+		let iterations = 0;
+		while (this.hasOverflow(rendered, bounds)) {
+			iterations++;
+			if (iterations >= 10) {
+				console.warn(
+					"paged-with-floats: stopped re-extracting residual overflow on a page (guard limit)",
+				);
+				break;
+			}
+			iterations++;
+			try {
+				this.clearOverflowTags(rendered);
+				const range = this.findOverflow(rendered, bounds, source);
+				if (!range) {
+					break;
+				}
+				const residualToken = this.processOverflowResult(
+					[range],
+					rendered,
+					source,
+					bounds,
+					prevBreakToken,
+					breakToken.node,
+					true,
+				);
+				if (residualToken && residualToken.overflow.length) {
+					breakToken.overflow.push(...residualToken.overflow);
+				} else {
+					break;
+				}
+			} catch (error) {
+				console.warn(
+					"paged-with-floats: residual overflow sweep failed: " +
+						(error as Error).message,
+				);
+				break;
+			}
+		}
+		this.inResidualSweep = false;
+	}
+
+	/**
+	 * Sweeps every manual column of the page for overflow that appeared
+	 * after the page's last check, folding the residue into the outgoing
+	 * token and coalescing out-of-order blocks when the break moved earlier.
+	 */
+	private sweepResidualColumnOverflow(
+		wrapper: HTMLElement,
+		source: DocumentFragment | Node,
+		breakToken: BreakToken,
+		prevBreakToken: BreakToken | undefined,
+	): void {
+		const previousEarliest = this.earliestOverflowNode(breakToken.overflow);
+		const columns = wrapper.querySelectorAll<HTMLElement>(
+			":scope > .paged_columns > .paged_column",
+		);
+		for (const column of columns) {
+			const spill = column.scrollHeight - column.clientHeight;
+			if (spill > OVERFLOW_TOLERANCE) {
+				const columnBounds = this.manualColumnBounds(column);
+				if (this.hasOverflow(column, columnBounds)) {
+					this.extractResidualOverflow(
+						column,
+						columnBounds,
+						source,
+						breakToken,
+						prevBreakToken,
+					);
+				}
+			}
+		}
+		const newEarliest = this.earliestOverflowNode(breakToken.overflow);
+		if (newEarliest !== previousEarliest) {
+			const pageEl = wrapper.closest(".paged_page");
+			const footnoteArea = pageEl
+				? pageEl.querySelector(".paged_footnote_area")
+				: null;
+			if (footnoteArea && (footnoteArea.textContent || "").trim().length) {
+				this.coalesceResidualOverflow(wrapper, source, breakToken);
+			}
+		}
+	}
+
+	/**
+	 * The source node with the earliest document position among the
+	 * overflow entries' nodes.
+	 */
+	private earliestOverflowNode(
+		overflows: Overflow[] | undefined,
+	): Node | undefined {
+		if (!overflows || !overflows.length) {
+			return undefined;
+		}
+		let earliest: Node | undefined;
+		for (const overflow of overflows) {
+			if (!overflow.node) {
+				continue;
+			}
+			if (!earliest) {
+				earliest = overflow.node;
+				continue;
+			}
+			try {
+				const position = overflow.node.compareDocumentPosition(earliest);
+				if (position & Node.DOCUMENT_POSITION_PRECEDING) {
+					earliest = overflow.node;
+				}
+			} catch {
+				// comparison errors ignored
+			}
+		}
+		return earliest;
+	}
+
+	/**
+	 * When residual overflow was discovered earlier than the token's
+	 * existing entries, extracts every rendered block that follows the
+	 * earliest point so the next page lays everything out in document order.
+	 */
+	private coalesceResidualOverflow(
+		wrapper: HTMLElement,
+		source: DocumentFragment | Node,
+		breakToken: BreakToken,
+	): void {
+		const earliest = this.earliestOverflowNode(breakToken.overflow);
+		if (!earliest) {
+			return;
+		}
+		const candidates = wrapper.querySelectorAll(
+			":scope > .paged_columns > .paged_column > *, :scope > :not(.paged_float_top):not(.paged_float_bottom):not(.paged_float_spacer):not(.paged_columns)",
+		);
+		const removed = document.createDocumentFragment();
+		let keptSource: Element | null = null;
+		for (const block of Array.from(candidates)) {
+			const el = block as HTMLElement;
+			if (
+				el.classList &&
+				(el.classList.contains("paged_float_top") ||
+					el.classList.contains("paged_float_bottom") ||
+					el.classList.contains("paged_float_spacer") ||
+					el.classList.contains("paged_columns"))
+			) {
+				continue;
+			}
+			if (!el.dataset?.ref) {
+				continue;
+			}
+			const sourceEl = findElement(el, source as WithRefs);
+			if (!sourceEl) {
+				continue;
+			}
+			if (!keptSource && sourceEl.contains(earliest)) {
+				keptSource = sourceEl;
+				continue;
+			}
+			let isAfter = false;
+			try {
+				const position = sourceEl.compareDocumentPosition(earliest);
+				if (position & Node.DOCUMENT_POSITION_PRECEDING) {
+					isAfter = true;
+				}
+			} catch {
+				continue;
+			}
+			if (!isAfter && keptSource && sourceEl === keptSource) {
+				isAfter = true;
+			}
+			if (!isAfter) {
+				continue;
+			}
+			const range = document.createRange();
+			range.selectNode(block);
+			const overflow = this.createOverflow(range, wrapper, source);
+			if (overflow) {
+				overflow.content = this.removeOverflow(range);
+				overflow.ancestor =
+					findElement(
+						range.commonAncestorContainer,
+						source as WithRefs,
+					) || undefined;
+				breakToken.overflow.push(overflow);
+				removed.appendChild(overflow.content.cloneNode(true));
+			} else {
+				const contentFragment = document.createDocumentFragment();
+				for (const childNode of Array.from(block.childNodes)) {
+					contentFragment.appendChild(childNode.cloneNode(true));
+				}
+				if (block.parentElement) {
+					block.parentElement.removeChild(block);
+				}
+				const fallbackOverflow = new Overflow(
+					sourceEl,
+					0,
+					0,
+					undefined,
+					true,
+				);
+				fallbackOverflow.content = contentFragment;
+				breakToken.overflow.push(fallbackOverflow);
+				removed.appendChild(contentFragment.cloneNode(true));
+			}
+		}
+		if (removed.hasChildNodes()) {
+			this.hooks.afterOverflowRemoved.trigger(removed, wrapper, this);
+		}
+	}
+
+	/**
+	 * The resume token for a wrapper that grew back under-full: the node
+	 * after the last rendered element's source counterpart. The token is
+	 * anchored at whatever follows (possibly nothing) once anything was
+	 * rendered at all.
+	 */
+	findEndToken(
+		rendered: HTMLElement,
+		source: DocumentFragment | Node,
+	): BreakToken | undefined {
+		let last = rendered.lastElementChild as HTMLElement | null;
+		while (last && last.lastElementChild) {
+			last = last.lastElementChild as HTMLElement;
+		}
+		if (!last) {
+			return undefined;
+		}
+		const counterpart = findElement(last, source as WithRefs);
+		const next = nodeAfter(counterpart as Node, source, false, false);
+		return this.breakAt(next);
+	}
+
+	/**
+	 * The character offset at which `node` first exceeds the available
+	 * space; undefined means no break is needed within this node (the
+	 * prediction path) or 0 (the legacy path's conversion of "no break").
+	 */
+	textBreak(
+		node: Text,
+		start: number,
+		end: number,
+		vStart: number,
+		vEnd: number,
+	): number | undefined {
+		const __offset = this.textBreakInner(node, start, end, vStart, vEnd);
+		return __offset;
+	}
+
+	private textBreakInner(
+		node: Text,
+		start: number,
+		end: number,
+		vStart: number,
+		vEnd: number,
+	): number | undefined {
+		this.addTemporarySplit(node.parentElement);
+		const parentAdditions = this.parentBottomAdditions(node.parentElement);
+		if (this.settings.textMeasurement === "pretext" && !this.predictFallbacks.has(node)) {
+			let predicted: number | undefined | null;
+			try {
+				predicted = this.predictTextBreak(
+					node,
+					start,
+					end,
+					vStart,
+					vEnd,
+					parentAdditions,
+				);
+			} catch {
+				predicted = null;
+			}
+			if (predicted === null) {
+				this.predictFallbacks.add(node);
+				predictStats.fallbacks++;
+			} else {
+				this.deleteTemporarySplit(node.parentElement);
+				if (predicted === undefined) {
+					return undefined;
+				}
+				if (
+					!(node.textContent || "").substring(0, predicted).trim().length
+				) {
+					return 0;
+				}
+				return predicted;
+			}
+		}
+		const legacyOffset = this.legacyTextBreakCore(
+			node,
+			start,
+			end,
+			vStart,
+			vEnd,
+			parentAdditions,
+		);
+		if (legacyOffset === undefined) {
+			// Nothing in this node crosses the available space: the caller
+			// advances past the whole node instead of breaking at offset 0.
+			return undefined;
+		}
+		this.deleteTemporarySplit(node.parentElement);
+		if (
+			!(node.textContent || "").substring(0, legacyOffset).trim().length
+		) {
+			return 0;
+		}
+		return legacyOffset;
+	}
+
+	/**
+	 * The bottom padding + border-width + margin sums of the parent chain,
+	 * granting the walk's slack when verifying breaks.
+	 */
+	private parentBottomAdditions(parent: Element | null): number {
+		if (!parent) {
+			return 0;
+		}
+		// Margins are blank space no content renders into, so they never
+		// count toward the space a line may occupy; only ancestor padding
+		// and borders can visually hold content past its box.
+		const sums = this.getAncestorPaddingBorderAndMarginSums(
+			parent,
+			true,
+			true,
+		);
+		return (
+			sums["padding-bottom"] +
+			sums["border-bottom-width"]
+		);
+	}
+
+	/**
+	 * The legacy fallback word/letter rect walker: the first word (or
+	 * letter) whose box passes the available space is the break.
+	 */
+	private legacyTextBreakCore(
+		node: Text,
+		start: number,
+		end: number,
+		vStart: number,
+		vEnd: number,
+		parentAdditions: number,
+	): number | undefined {
+		const frag = this.getFragmentainer(node);
+		for (const word of words(node)) {
+			const rect = getBoundingClientRect(word);
+			if (!rect) {
+				continue;
+			}
+			const left = Math.floor(rect.left);
+			const right = Math.floor(rect.right);
+			const top = rect.top;
+			const bottom = rect.bottom;
+			if (frag) {
+				const wordRect = new DOMRect(
+					left,
+					top,
+					right - left,
+					bottom - top,
+				);
+				if (this.rectOverflows(wordRect, parentAdditions, frag)) {
+					return word.startOffset;
+				}
+				continue;
+			}
+			if (left > end || top > vEnd - parentAdditions) {
+				return word.startOffset;
+			}
+			if (right > end || bottom > vEnd - parentAdditions) {
+				for (const letter of letters(word)) {
+					const letterRect = getBoundingClientRect(letter);
+					if (!letterRect) {
+						continue;
+					}
+					if (
+						Math.floor(letterRect.right) > end ||
+						letterRect.bottom > vEnd - parentAdditions
+					) {
+						return letter.startOffset;
+					}
+				}
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Whether the node's LAST character renders outside the bounds: when it
+	 * does not, flow order is monotonic and nothing earlier can overflow.
+	 */
+	private textEndOverflows(
+		node: Text,
+		frag: Element | null,
+		parentAdditions: number,
+	): boolean {
+		const text = node.textContent || "";
+		if (!text.length) {
+			return false;
+		}
+		const range = document.createRange();
+		range.setStart(node, text.length - 1);
+		range.setEnd(node, text.length);
+		const rect = getBoundingClientRect(range);
+		if (!rect || (rect.width === 0 && rect.height === 0)) {
+			return true;
+		}
+		return this.rectOverflows(rect, parentAdditions, frag);
+	}
+
+	/**
+	 * The pretext-backed prediction fast path; returns an offset when
+	 * confidently predicted, undefined when the text provably fits, null to
+	 * request the legacy fallback.
+	 */
+	private predictTextBreak(
+		node: Text,
+		start: number,
+		end: number,
+		vStart: number,
+		vEnd: number,
+		parentAdditions: number,
+	): number | undefined | null {
+		const startTime = performance.now();
+		try {
+			return this.predictTextBreakInner(
+				node,
+				start,
+				end,
+				vStart,
+				vEnd,
+				parentAdditions,
+			);
+		} finally {
+			predictStats.predictMs += performance.now() - startTime;
+		}
+	}
+
+	/**
+	 * The prediction decision sequence: capability gates, quick-fit probe,
+	 * word inventory, arithmetic line walk with narrowing retries, and
+	 * verified probes before the offset is accepted.
+	 */
+	private predictTextBreakInner(
+		node: Text,
+		start: number,
+		end: number,
+		vStart: number,
+		vEnd: number,
+		parentAdditions: number,
+	): number | undefined | null {
+		if (!measurementCapabilities()) {
+			return rejectPrediction("capabilities");
+		}
+		const spec = buildFontSpec(node.parentElement);
+		if (!spec || spec.lineHeight <= 0) {
+			return rejectPrediction("font-spec");
+		}
+		const text = node.textContent || "";
+		if (!text.trim().length) {
+			return undefined;
+		}
+		const frag = this.getFragmentainer(node);
+		predictStats.predicts++;
+		const shrinkList = this.predictionVerified
+			? PREDICT_WIDTH_SHRINKS_PX
+			: [0];
+		if (!this.predictionVerified) {
+			predictStats.unverified++;
+		}
+		if (this.predictionVerified && !this.textEndOverflows(node, frag, parentAdditions)) {
+			predictStats.quickFits++;
+			return undefined;
+		}
+		const wordList: Range[] = [];
+		for (const word of words(node)) {
+			wordList.push(word);
+			if (wordList.length > 5000) {
+				return rejectPrediction("too-many-words");
+			}
+		}
+		if (wordList.length < 2) {
+			return rejectPrediction("too-few-words");
+		}
+		const r0 = getBoundingClientRect(wordList[0]);
+		if (!r0) {
+			return rejectPrediction("no-first-rect");
+		}
+		if (this.rectOverflows(r0, parentAdditions, frag)) {
+			return wordList[0].startOffset;
+		}
+		if (wordList.length < PREDICT_MIN_WORDS) {
+			return rejectPrediction("min-words");
+		}
+		let colLeft: number;
+		let colRight: number;
+		let colBottom: number;
+		let columnsRemaining: number;
+		let box: { left: number; top: number; right: number; bottom: number } | null = null;
+		let meta: FragmentainerMeta | null = null;
+		let stride = 0;
+		let colIndex0 = 0;
+		if (frag) {
+			box = this.fragmentainerBox(frag);
+			meta = this.getFragmentainerMeta(frag);
+			stride = meta.columnWidth + meta.gap;
+			colIndex0 = Math.floor((r0.left - box.left + COLUMN_EPSILON) / stride);
+			if (colIndex0 < 0) {
+				colIndex0 = 0;
+			}
+			if (colIndex0 > meta.count - 1) {
+				colIndex0 = meta.count - 1;
+			}
+			if (meta.columnWidth < 4) {
+				return rejectPrediction("narrow-column");
+			}
+			colLeft = box.left + colIndex0 * stride;
+			colRight = colLeft + meta.columnWidth;
+			colBottom = box.bottom - parentAdditions;
+			columnsRemaining = meta.count - 1 - colIndex0;
+		} else {
+			colLeft = start;
+			colRight = end;
+			colBottom = vEnd - parentAdditions;
+			columnsRemaining = 0;
+		}
+		const parent = node.parentElement;
+		const ref = parent?.dataset?.ref;
+		const fk = fontKey(spec);
+		const nodeIndex = parent ? textNodeIndexInParent(node, parent) : -1;
+		let prepared: PreparedTextWithSegments | null = null;
+		let baseOffset = 0;
+		let truncated = false;
+		const eagerList = ref ? eagerPreparedTexts.get(ref) : undefined;
+		if (eagerList && parent) {
+			const entry = eagerList.find(
+				(candidate) =>
+					candidate.childIndex === nodeIndex &&
+					candidate.fontKey === fk &&
+					candidate.fullText.endsWith(text),
+			);
+			if (entry) {
+				prepared = entry.prepared;
+				baseOffset = entry.fullText.length - text.length;
+				predictStats.reuses++;
+			}
+		}
+		if (!prepared && ref) {
+			const stored = this.continuationPrepared.get(ref);
+			if (
+				stored &&
+				stored.fontKey === fk &&
+				stored.fullText.length > text.length &&
+				stored.fullText.endsWith(text)
+			) {
+				prepared = stored.prepared;
+				baseOffset = stored.fullText.length - text.length;
+				predictStats.reuses++;
+			}
+		}
+		if (!prepared) {
+			const preparedText =
+				text.length > PREDICT_MAX_CHARS
+					? text.substring(0, PREDICT_MAX_CHARS)
+					: text;
+			truncated = preparedText.length !== text.length;
+			const prepareStart = performance.now();
+			prepared = this.measure.prepare(preparedText, spec);
+			predictStats.prepareCalls++;
+			predictStats.prepareMs += performance.now() - prepareStart;
+		}
+		let lastReject: string | null = null;
+		for (const shrink of shrinkList) {
+			let y = r0.top;
+			let currentColIndex = colIndex0;
+			let currentColRight = colRight;
+			let remaining = columnsRemaining;
+			let candidate: LayoutCursor | null = null;
+			let firstLine = true;
+			this.measure.walkLines(
+				prepared,
+				Math.max(currentColRight - r0.left - shrink, 1),
+				Math.max(
+					frag && meta ? meta.columnWidth - shrink : colRight - colLeft - shrink,
+					1,
+				),
+				(line) => {
+					const fits = y + spec.lineHeight <= colBottom + COLUMN_EPSILON;
+					if (!fits) {
+						if (remaining > 0 && box && meta) {
+							remaining--;
+							currentColIndex++;
+							currentColRight =
+								box.left + currentColIndex * stride + meta.columnWidth;
+							y = box.top + spec.lineHeight;
+							return;
+						}
+						candidate = line.start;
+						return false;
+					}
+					y += spec.lineHeight;
+					firstLine = false;
+				},
+			);
+			void firstLine;
+			if (!candidate) {
+				if (truncated) {
+					return rejectPrediction("truncated");
+				}
+				if (!this.predictionVerified) {
+					return undefined;
+				}
+				const lastRect = getBoundingClientRect(
+					wordList[wordList.length - 1],
+				);
+				if (
+					!lastRect ||
+					this.rectOverflows(lastRect, parentAdditions, frag)
+				) {
+					lastReject = "fits-mismatch";
+					continue;
+				}
+				return undefined;
+			}
+			const absOffset = this.measure.cursorToOffset(prepared, candidate);
+			const candidateOffset = absOffset - baseOffset;
+			if (candidateOffset <= 0 || candidateOffset > text.length) {
+				return rejectPrediction("offset-range");
+			}
+			let j = 0;
+			for (let i = 0; i < wordList.length; i++) {
+				if (wordList[i].startOffset <= candidateOffset) {
+					j = i;
+				} else {
+					break;
+				}
+			}
+			if (!this.predictionVerified) {
+				return wordList[j].startOffset;
+			}
+			const overflowMemo = new Map<number, boolean | undefined>();
+			const overflows = (index: number): boolean | undefined => {
+				if (overflowMemo.has(index)) {
+					return overflowMemo.get(index);
+				}
+				const rect = getBoundingClientRect(wordList[index]);
+				let value: boolean | undefined;
+				if (!rect || (rect.width === 0 && rect.height === 0)) {
+					value = undefined;
+				} else {
+					value = this.rectOverflows(rect, parentAdditions, frag);
+				}
+				overflowMemo.set(index, value);
+				return value;
+			};
+			let nudges = 0;
+			while (j < wordList.length - 1 && overflows(j) === false && nudges < 3) {
+				j++;
+				nudges++;
+			}
+			if (overflows(j) !== true) {
+				lastReject = "no-nonfit";
+				break;
+			}
+			while (j > 0 && overflows(j - 1) === true && nudges < 6) {
+				j--;
+				nudges++;
+			}
+			if (j > 0 && overflows(j - 1) === true) {
+				lastReject = "prev-overlaps";
+				continue;
+			}
+			if (ref) {
+				if (this.continuationPrepared.size >= CONTINUATION_CACHE_MAX) {
+					this.continuationPrepared.clear();
+				}
+				this.continuationPrepared.set(ref, {
+					fullText: text,
+					fontKey: fk,
+					prepared,
+				});
+			}
+			return wordList[j].startOffset;
+		}
+		return rejectPrediction(lastReject || "exhausted");
+	}
+
+	/**
+	 * Temporarily lengthens the layout context so wrapped content can reach
+	 * its natural height: multicol fragmentainers get height auto, other
+	 * content a 5000px pagebox, plus data-split-from markers.
+	 */
+	removeHeightConstraint(element: Element): void {
+		const frag = this.getFragmentainer(element);
+		if (frag && frag !== this.element) {
+			this.savedFragmentainerHeights.set(
+				frag as HTMLElement,
+				(frag as HTMLElement).style.height,
+			);
+			(frag as HTMLElement).style.height = "auto";
+		} else {
+			const page = element.parentElement?.closest(".paged_page");
+			if (page) {
+				(page as HTMLElement).style.setProperty(
+					"--paged-pagebox-height",
+					"5000px",
+				);
+			}
+		}
+		this.addTemporarySplit(element.parentElement, false);
+		this.invalidateBounds();
+	}
+
+	/**
+	 * Exact inverse of removeHeightConstraint; callers must pair the calls.
+	 */
+	restoreHeightConstraint(element: Element): void {
+		const frag = this.getFragmentainer(element);
+		if (frag && frag !== this.element) {
+			const saved = this.savedFragmentainerHeights.get(frag);
+			(frag as HTMLElement).style.height = saved ?? "";
+			this.savedFragmentainerHeights.delete(frag);
+		} else {
+			const page = element.parentElement?.closest(".paged_page");
+			if (page) {
+				(page as HTMLElement).style.removeProperty("--paged-pagebox-height");
+			}
+		}
+		this.deleteTemporarySplit(element.parentElement, false);
+		this.invalidateBounds();
+	}
+
+	/**
+	 * The element's natural height with the height constraint lifted:
+	 * rect height plus the ancestor chain's top/bottom padding, border and
+	 * margin sums plus any repeated thead heights. Non-element nodes (text
+	 * nodes reached from an overflow start) are measured through a document
+	 * range spanning the node.
+	 */
+	getUnconstrainedElementHeight(
+		element: Element,
+		includeAncestors = true,
+		includeTableHead = true,
+	): number {
+		this.removeHeightConstraint(element);
+		const box = getBoundingClientRect(element);
+		let total = box ? box.height : 0;
+		if (includeAncestors) {
+			const sums = this.getAncestorPaddingBorderAndMarginSums(
+				element.parentElement,
+			);
+			total +=
+				sums["padding-top"] +
+				sums["padding-bottom"] +
+				sums["border-top-width"] +
+				sums["border-bottom-width"] +
+				sums["margin-top"] +
+				sums["margin-bottom"];
+		}
+		if (includeTableHead) {
+			total += this.getAncestorTheadSizes(element.parentElement);
+		}
+		this.restoreHeightConstraint(element);
+		return total;
+	}
+
+	/**
+	 * Sums 12 computed box properties over the ancestor chain starting AT
+	 * the given element. Computed values are accumulated with parseInt
+	 * without a guard, so a non-px/empty computed value contributes NaN and
+	 * poisons the sum. Assumes no margin collapsing.
+	 */
+	getAncestorPaddingBorderAndMarginSums(
+		element?: Element | null,
+		stopAtFragmentainer = false,
+		excludeMargins = false,
+	): Record<string, number> {
+		const sums: Record<string, number> = {
+			"padding-top": 0,
+			"padding-right": 0,
+			"padding-bottom": 0,
+			"padding-left": 0,
+			"border-top-width": 0,
+			"border-right-width": 0,
+			"border-bottom-width": 0,
+			"border-left-width": 0,
+			"margin-top": 0,
+			"margin-right": 0,
+			"margin-bottom": 0,
+			"margin-left": 0,
+		};
+		const keys = Object.keys(sums).filter(
+			(key) => !(excludeMargins && key.startsWith("margin-")),
+		);
+		let current: Element | null = element || null;
+		while (current) {
+			if (
+				current.classList.contains("paged_page_content") ||
+				current.classList.contains("paged_footnote_inner_content")
+			) {
+				break;
+			}
+			if (
+				stopAtFragmentainer &&
+				current !== this.element &&
+				this.fragmentainers.has(current)
+			) {
+				break;
+			}
+			const style = getComputedStyle(current);
+			for (const key of keys) {
+				sums[key] += parseInt(style.getPropertyValue(key));
+			}
+			current = current.parentElement;
+		}
+		return sums;
+	}
+
+	/**
+	 * Sums the computed height of every direct THEAD child of each TABLE on
+	 * the ancestor walk.
+	 */
+	getAncestorTheadSizes(element?: Element | null): number {
+		let total = 0;
+		let current: Element | null = element || null;
+		while (current) {
+			if (
+				current.classList.contains("paged_page_content") ||
+				current.classList.contains("paged_footnote_inner_content")
+			) {
+				break;
+			}
+			if (current.tagName === "TABLE") {
+				for (const childEl of Array.from(current.children)) {
+					if (childEl.tagName === "THEAD") {
+						total += parseInt(getComputedStyle(childEl).height);
+					}
+				}
+			}
+			current = current.parentElement;
+		}
+		return total;
+	}
+
+	/**
+	 * Walks up from the given element marking data-split-to (or
+	 * data-split-from) with a temporary scoped value, without overwriting
+	 * existing markers.
+	 */
+	addTemporarySplit(element?: Element | null, isTo = true): void {
+		this.temporaryIndex++;
+		const attribute = isTo ? "data-split-to" : "data-split-from";
+		let current: Element | null = element || null;
+		while (current) {
+			if (
+				current.classList.contains("paged_page_content") ||
+				current.classList.contains("paged_footnote_inner_content")
+			) {
+				break;
+			}
+			if (!current.hasAttribute(attribute)) {
+				current.setAttribute(attribute, "temp-" + this.temporaryIndex);
+			}
+			current = current.parentElement;
+		}
+		this.invalidateBounds();
+	}
+
+	/**
+	 * The inverse walk: removes the temporary markers set by the most
+	 * recent add only (value must equal "temp-" + the current index).
+	 */
+	deleteTemporarySplit(element?: Element | null, isTo = true): void {
+		const attribute = isTo ? "data-split-to" : "data-split-from";
+		const expected = "temp-" + this.temporaryIndex;
+		let current: Element | null = element || null;
+		while (current) {
+			if (
+				current.classList.contains("paged_page_content") ||
+				current.classList.contains("paged_footnote_inner_content")
+			) {
+				break;
+			}
+			if (current.getAttribute(attribute) === expected) {
+				current.removeAttribute(attribute);
+			}
+			current = current.parentElement;
+		}
+		this.invalidateBounds();
+	}
+
+	/**
+	 * The number of body rows (rows outside thead, whose closest table is
+	 * exactly `table`) that precede `row` in table.rows.
+	 */
+	tableBodyRowsBefore(row: Element, table: Element): number {
+		let count = 0;
+		for (const tableRow of Array.from((table as HTMLTableElement).rows)) {
+			if (tableRow === row) {
+				break;
+			}
+			if (!tableRow.closest("thead") && tableRow.closest("table") === table) {
+				count++;
+			}
+		}
+		return count;
+	}
+
+	/**
+	 * Whether any visible content precedes `element` on the page:
+	 * geometry-dependent, so always false in jsdom.
+	 */
+	hasVisibleContentBefore(element: Element, rendered: HTMLElement): boolean {
+		let current: Element | null = element;
+		while (current && current !== rendered) {
+			let sibling = current.previousSibling;
+			while (sibling) {
+				const probe = isElement(sibling)
+					? (sibling as Element)
+					: sibling.parentElement;
+				if (probe && probe !== rendered) {
+					if (probe.getBoundingClientRect().height > 0) {
+						return true;
+					}
+				}
+				sibling = sibling.previousSibling;
+			}
+			current = current.parentElement;
+		}
+		return false;
+	}
+
+	/**
+	 * When the overflow starts inside a table row, returns the element the
+	 * break must be placed before: the whole table (when moving it converges
+	 * better), undefined (defer to break-inside or mid-row splitting), or
+	 * the row itself.
+	 */
+	tableRowNeedsBreakAt(
+		node: Node,
+		rendered: HTMLElement,
+		bounds: DOMRect,
+	): Element | undefined {
+		const probe = (isElement(node) ? node : node.parentElement) as Element;
+		if (!probe || typeof probe.closest !== "function") {
+			return undefined;
+		}
+		const row = probe.closest("tr");
+		if (!row) {
+			return undefined;
+		}
+		if (!row.isConnected || !rendered.contains(row)) {
+			return undefined;
+		}
+		const rowBounds = row.getBoundingClientRect();
+		const rowHeight =
+			rowBounds.width > bounds.width
+				? this.getUnconstrainedElementHeight(row)
+				: rowBounds.height;
+		if (rowHeight > bounds.height) {
+			return undefined;
+		}
+		const table = row.closest("table");
+		if (table && rendered.contains(table)) {
+			if (this.tableBodyRowsBefore(row, table) === 0) {
+				if (this.hasVisibleContentBefore(table, rendered)) {
+					return table;
+				}
+			}
+		}
+		if ((row as HTMLElement).dataset?.originalBreakInside === "avoid") {
+			return undefined;
+		}
+		return row;
+	}
+
+	/**
+	 * Only for TR nodes in tables containing a colspan element: when the
+	 * row's cell count differs from the table's column count, returns the
+	 * previous full row the following rowspan hangs over.
+	 */
+	rowspanNeedsBreakAt(
+		tableRow: Element,
+		rendered: HTMLElement,
+	): Element | undefined {
+		if (tableRow.nodeName !== "TR") {
+			return undefined;
+		}
+		const table = parentOf(tableRow, "TABLE", rendered) as Element | undefined;
+		if (!table) {
+			return undefined;
+		}
+		if (!table.querySelector("[colspan]")) {
+			return undefined;
+		}
+		const firstRow = (table as HTMLTableElement).rows[0];
+		if (!firstRow) {
+			return undefined;
+		}
+		const colspanSum = (row: Element): number => {
+			let total = 0;
+			for (const cell of Array.from(row.children)) {
+				const value = parseInt(cell.getAttribute("colspan") || "");
+				total += Number.isNaN(value) ? 1 : value;
+			}
+			return total;
+		};
+		const columnCount = colspanSum(firstRow);
+		const cellCount = (row: Element): number => row.children.length;
+		if (cellCount(tableRow) === columnCount) {
+			return undefined;
+		}
+		let fallback: Element = tableRow;
+		let candidate: Element | null = tableRow.previousElementSibling;
+		while (candidate) {
+			if (cellCount(candidate) === columnCount) {
+				return candidate;
+			}
+			fallback = candidate;
+			candidate = candidate.previousElementSibling;
+		}
+		return fallback;
+	}
+
+	/**
+	 * Whether the node matches any configured column-span selector.
+	 * Author-CSS tracking decides — computed style on detached source nodes
+	 * is unreliable.
+	 */
+	private isColumnSpan(node: Node | null | undefined): boolean {
+		if (!node || !(node instanceof HTMLElement)) {
+			return false;
+		}
+		for (const selector of this.columnSpanSelectors) {
+			try {
+				if (node.matches(selector)) {
+					return true;
+				}
+			} catch {
+				// invalid selectors are skipped silently
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * Opens a new column segment below a span: a .paged_columns row with
+	 * count .paged_column boxes sized like the page's initial row.
+	 */
+	private startSpanRow(wrapper: HTMLElement): HTMLElement[] {
+		const floored = this.rootColumns ? Math.floor(this.rootColumns.count) : 0;
+		if (!this.rootColumns || floored <= 1) {
+			return [wrapper];
+		}
+		const gap =
+			this.rootColumns.gap !== undefined && this.rootColumns.gap !== "normal"
+				? this.rootColumns.gap
+				: "1em";
+		const fill = this.rootColumns.fill || "balance";
+		const row = document.createElement("div");
+		row.classList.add("paged_columns");
+		row.style.gap = gap;
+		row.dataset.pagedColumnFill = fill;
+		for (let i = 0; i < floored; i++) {
+			const column = document.createElement("div");
+			column.classList.add("paged_column");
+			column.dataset.pagedColumn = String(i);
+			column.style.width = `calc((100% - ${floored - 1} * ${gap}) / ${floored})`;
+			if (i > 0 && this.rootColumns.ruleWidth) {
+				let borderLeft = `${this.rootColumns.ruleWidth} ${this.rootColumns.ruleStyle || "solid"}`;
+				if (this.rootColumns.ruleColor) {
+					borderLeft += ` ${this.rootColumns.ruleColor}`;
+				}
+				column.style.borderLeft = borderLeft;
+			}
+			row.appendChild(column);
+		}
+		wrapper.appendChild(row);
+		return Array.from(
+			row.querySelectorAll<HTMLElement>(":scope > .paged_column"),
+		);
+	}
+
+	/**
+	 * Moves a column-span:all node whole into the flow host and opens the
+	 * next segment row for it, shrinking the completed row first and
+	 * migrating overflow the shrink exposes.
 	 */
 	private applyColumnSpan(
 		wrapper: HTMLElement,
@@ -1050,97 +3880,56 @@ class Layout {
 		source: DocumentFragment | Node,
 		breakToken: BreakToken | undefined,
 	): HTMLElement[] {
-		// Shrink the segment just completed to its real content height so
-		// the freed space goes to the new segment. Must run before the new
-		// row opens, while the row still holds its full height.
-		const completedRows = wrapper.querySelectorAll(
+		const rows = wrapper.querySelectorAll<HTMLElement>(
 			":scope > .paged_columns",
 		);
-		const completedRow = completedRows[completedRows.length - 1];
-		if (completedRow) {
-			this.shrinkCorrectSegmentRow(completedRow as HTMLElement);
+		if (rows.length) {
+			this.shrinkCorrectSegmentRow(rows[rows.length - 1]);
 		}
 		this.append(node, wrapper, source, breakToken, false);
 		const newColumns = this.startSpanRow(wrapper);
-		// Give the new segment its planned natural height, if any.
 		this.applyPlannedSegmentHeight(node, newColumns);
-		// Opening a new segment row shrinks every segment row (the flow
-		// host's height is fixed, so flex re-distributes the free space).
-		// Content already laid out in an earlier column can now overflow its
-		// shorter box; move that overflow into the next column of the same
-		// segment so it is drawn instead of being dropped.
 		this.migrateShrunkenSegmentOverflow(wrapper, source);
 		return newColumns;
 	}
 
 	/**
-	 * After a new `column-span` segment row is opened, re-check every earlier
-	 * segment's columns: their rows have shrunk, so content that previously
-	 * fitted can now overflow. Move the overflowing content into the next
-	 * column of the same segment, preserving it in document order.
-	 *
-	 * @param {HTMLElement} wrapper - The flow host.
-	 * @param {DocumentFragment|Node} source - The source content.
-	 * @returns {void}
+	 * After a new segment row opens, flex re-distributes and earlier segment
+	 * rows shrink; content that previously fitted can now overflow. Moves
+	 * such overflow into the next column of the same segment so migrated
+	 * content stays in document order.
 	 */
 	private migrateShrunkenSegmentOverflow(
 		wrapper: HTMLElement,
 		source: DocumentFragment | Node,
 	): void {
-		const rows = Array.from(
-			wrapper.querySelectorAll(":scope > .paged_columns"),
+		const rows = wrapper.querySelectorAll<HTMLElement>(
+			":scope > .paged_columns",
 		);
-		const lastRow = rows[rows.length - 1];
-		for (const row of rows) {
-			if (row === lastRow) {
-				continue;
-			}
+		for (let r = 0; r < rows.length - 1; r++) {
 			const columns = Array.from(
-				row.querySelectorAll<HTMLElement>(":scope > .paged_column"),
+				rows[r].querySelectorAll<HTMLElement>(":scope > .paged_column"),
 			);
-			for (let i = 0; i < columns.length; i++) {
-				const column = columns[i];
+			for (let c = 0; c < columns.length; c++) {
+				const column = columns[c];
 				let guard = 0;
 				while (this.hasOverflow(column, this.manualColumnBounds(column))) {
-					if (++guard > 10) {
+					if (guard >= 10) {
 						break;
 					}
-					column
-						.querySelectorAll(
-							"[data-overflow-tagged], [data-range-start-overflow], [data-range-end-overflow]",
-						)
-						.forEach((el) => {
-							el.removeAttribute("data-overflow-tagged");
-							el.removeAttribute("data-range-start-overflow");
-							el.removeAttribute("data-range-end-overflow");
-						});
-					column.removeAttribute("data-overflow-tagged");
-					column.removeAttribute("data-range-start-overflow");
-					column.removeAttribute("data-range-end-overflow");
-					const range = this.findOverflow(
-						column,
-						this.manualColumnBounds(column),
-						source,
-					);
+					guard++;
+					this.clearOverflowTags(column);
+					const columnBounds = this.manualColumnBounds(column);
+					const range = this.findOverflow(column, columnBounds, source);
 					if (!range) {
 						break;
 					}
-					// Move the overflow into the next column of the same
-					// segment. If this is the segment's last column there is
-					// nowhere sensible on this page to put it (the content
-					// belongs before the span), so leave it untouched for the
-					// normal overflow path instead of removing it and losing it.
-					const target = columns[i + 1];
-					if (!target) {
+					if (c >= columns.length - 1) {
 						break;
 					}
 					const fragment = this.removeOverflow(range);
-					if (!fragment || !fragment.childNodes.length) {
-						break;
-					}
-					// Prepend so migrated content stays in document order when the
-					// target column already contains later content.
-					if (target.firstChild) {
+					const target = columns[c + 1];
+					if (target.hasChildNodes()) {
 						target.insertBefore(fragment, target.firstChild);
 					} else {
 						target.appendChild(fragment);
@@ -1151,29 +3940,9 @@ class Layout {
 	}
 
 	/**
-	 * Plans natural heights for the `column-span` segments of this page.
-	 *
-	 * Without a plan every segment row gets an equal flex share of the flow
-	 * host, so a segment holding little content wastes the rest, and columns
-	 * filled against the pre-span full height spill massively when a new
-	 * segment row shrinks them. Instead, the content between the walk start
-	 * and each upcoming top-level `column-span: all` element is measured
-	 * arithmetically (pretext line counts from font metrics; DOM probes for
-	 * content pretext cannot model) and each segment row is fixed at the
-	 * height its content actually needs — rounded up to whole lines, so
-	 * estimation errors leave slack rather than cause overflow. The final
-	 * segment on the page always keeps its flexible height and absorbs
-	 * whatever space is left.
-	 *
-	 * The first row is fixed immediately; heights for later segments are
-	 * queued and consumed by applyColumnSpan() as the walker reaches each
-	 * span. When no top-level span lies ahead, nothing changes and rows keep
-	 * their flexible equal share.
-	 *
-	 * @param {HTMLElement} wrapper - The page's flow host.
-	 * @param {DocumentFragment|Node} source - The source content.
-	 * @param {Node|undefined} start - The node the walk starts at.
-	 * @returns {void}
+	 * Plans (once per page) the heights of the column segments a page's
+	 * spans will close, from measured/probed estimates of the upcoming
+	 * source blocks. Gates silently leave rows flexible.
 	 */
 	private planSegmentHeights(
 		wrapper: HTMLElement,
@@ -1181,52 +3950,45 @@ class Layout {
 		start: Node | undefined,
 	): void {
 		this.segmentHeightQueue = [];
-		const rootColumns = this.rootColumns;
-		if (!rootColumns || rootColumns.count <= 1) {
+		if (!this.rootColumns || this.rootColumns.count <= 1) {
 			return;
 		}
 		if (!this.columnSpanSelectors.size || !elementMeasures.size || !start) {
 			return;
 		}
-
-		const rows = wrapper.querySelectorAll(":scope > .paged_columns");
+		const rows = wrapper.querySelectorAll<HTMLElement>(
+			":scope > .paged_columns",
+		);
 		if (rows.length !== 1) {
 			return;
 		}
-		const firstRow = rows[0] as HTMLElement;
-		const columns = Array.from(
-			firstRow.querySelectorAll<HTMLElement>(":scope > .paged_column"),
+		const row = rows[0];
+		const columns = row.querySelectorAll<HTMLElement>(
+			":scope > .paged_column",
 		);
-		const count = columns.length;
-		if (count <= 1) {
+		if (columns.length <= 1) {
 			return;
 		}
-		const columnWidth = columns[0].getBoundingClientRect().width;
-		if (columnWidth < 8) {
+		const firstColumnRect = columns[0].getBoundingClientRect();
+		if (firstColumnRect.width < 8) {
 			return;
 		}
-
-		const flowRect = wrapper.getBoundingClientRect();
-		const floatTop = wrapper.querySelector<HTMLElement>(
-			":scope > .paged_float_top",
-		);
+		const floatTop = wrapper.querySelector(":scope > .paged_float_top");
 		const available =
-			flowRect.height -
+			wrapper.getBoundingClientRect().height -
 			(floatTop ? floatTop.getBoundingClientRect().height : 0);
 		if (available <= 0) {
 			return;
 		}
-		const fullWidth = flowRect.width;
-		const fill = this.rootColumns?.fill || "balance";
-
-		// Content already rebuilt into the row (carried overflow) is measured
-		// exactly; only the walk's remaining content needs estimating.
-		let segmentTotal = 0;
-		for (const extent of this.columnContentExtents(firstRow)) {
-			segmentTotal += extent;
-		}
-
-		// The top-level source node the walk starts in (or at).
+		const queue: Array<{
+			ref: string;
+			height: number | null;
+			spanHeight?: number;
+			minRoom?: number;
+			defer?: boolean;
+		}> = [];
+		const extents = this.columnContentExtents(row);
+		let segmentTotal = extents.reduce((sum, value) => sum + value, 0);
 		let topStart: Node | null = start;
 		while (topStart && topStart.parentNode !== source) {
 			topStart = topStart.parentNode;
@@ -1234,14 +3996,9 @@ class Layout {
 		if (!topStart) {
 			return;
 		}
-
-		const entries: Array<{
-			ref: string;
-			height: number | null;
-			spanHeight?: number;
-			minRoom?: number;
-			defer?: boolean;
-		}> = [];
+		const fullWidth = wrapper.getBoundingClientRect().width;
+		const columnWidth = firstColumnRect.width;
+		const fill = this.rootColumns.fill || "balance";
 		const ctx = { maxLine: 0, maxMargin: 0 };
 		let firstHeight: number | null = null;
 		let used = 0;
@@ -1250,138 +4007,95 @@ class Layout {
 		let spansSeen = 0;
 		let node: Node | null = topStart;
 		while (node) {
-			if (node instanceof HTMLElement && this.isColumnSpan(node)) {
-				spansSeen++;
-				// Close the segment: estimate how tall the row needs to be.
-				// With `column-fill: auto` the content stacks in the first
-				// column, so the natural height is the content's own height
-				// (capped at the page's available height); with `balance` it
-				// is distributed evenly over the columns.
-				const line = ctx.maxLine || 16;
-				const h = this.segmentRowHeight(
-					segmentTotal,
-					count,
-					line,
-					ctx.maxMargin,
-					available,
-					fill,
-				);
-				segmentTotal = 0;
-				ctx.maxLine = 0;
-				ctx.maxMargin = 0;
-				if (firstHeight === null) {
-					if (h >= available - COLUMN_EPSILON) {
-						// The first segment alone fills the page: no span can
-						// follow on this page, so there is nothing to plan.
-						return;
-					}
-					firstHeight = h;
-					used = h;
-				} else if (pendingSpanRef !== null) {
-					// Fix the segment's row at its natural height whenever the
-					// segment itself fits in the space left by the rows and
-					// spans before it — even if the span that follows will
-					// not fit afterwards (it then breaks to the next page,
-					// which is the desired outcome). A row left flexible
-					// here is filled to the remaining page height and then
-					// shrunk when the next span opens, spilling content that
-					// has nowhere to go.
-					const fits = h < available - used - COLUMN_EPSILON;
-					entries.push({
-						ref: pendingSpanRef,
-						height: fits ? h : null,
-					});
-					used += h + pendingSpanHeight;
-					if (
-						!fits ||
-						used >= available - COLUMN_EPSILON ||
-						spansSeen >= 12
-					) {
-						// The page is full: the span that opens the next
-						// segment should be deferred (treated as ordinary
-						// content) when the walker reaches it and measures
-						// that no room is really left.
-						const deferCtx = { maxLine: 0, maxMargin: 0 };
-						entries.push({
-							ref: node.dataset.ref || "",
-							height: null,
-							spanHeight: this.estimateFlowBlockHeight(
-								node,
+			if (isElement(node)) {
+				const el = node as HTMLElement;
+				if (this.isColumnSpan(el)) {
+					const h = this.segmentRowHeight(
+						segmentTotal,
+						columns.length,
+						ctx.maxLine || 16,
+						ctx.maxMargin,
+						available,
+						fill,
+					);
+					if (firstHeight === null) {
+						if (h >= available - COLUMN_EPSILON) {
+							return;
+						}
+						firstHeight = h;
+						used = h;
+					} else if (pendingSpanRef !== null) {
+						const fits = h < available - used - COLUMN_EPSILON;
+						queue.push({ ref: pendingSpanRef, height: fits ? h : null });
+						used += h + pendingSpanHeight;
+						if (!fits || used >= available - COLUMN_EPSILON || spansSeen >= 12) {
+							const deferCtx = { maxLine: 0, maxMargin: 0 };
+							const spanHeight = this.estimateFlowBlockHeight(
+								el,
 								fullWidth,
 								deferCtx,
-							),
-							minRoom: line,
-							defer: true,
-						});
-						break;
+							);
+							queue.push({
+								ref: el.dataset.ref || "",
+								height: null,
+								spanHeight,
+								minRoom: deferCtx.maxLine || 16,
+								defer: true,
+							});
+							break;
+						}
 					}
+					spansSeen++;
+					pendingSpanRef = el.dataset.ref || "";
+					const spanCtx = { maxLine: 0, maxMargin: 0 };
+					pendingSpanHeight = this.estimateFlowBlockHeight(
+						el,
+						fullWidth,
+						spanCtx,
+					);
+					segmentTotal = 0;
+					ctx.maxLine = 0;
+					ctx.maxMargin = 0;
+				} else {
+					const skip =
+						node === topStart && start !== topStart ? start : undefined;
+					segmentTotal += this.estimateFlowBlockHeight(
+						el,
+						columnWidth,
+						ctx,
+						skip,
+					);
 				}
-				const spanCtx = { maxLine: 0, maxMargin: 0 };
-				pendingSpanRef = node.dataset.ref || "";
-				pendingSpanHeight = this.estimateFlowBlockHeight(
-					node,
-					fullWidth,
-					spanCtx,
-				);
-			} else if (node instanceof HTMLElement) {
-				const skip =
-					node === topStart && start !== topStart ? start : undefined;
-				segmentTotal += this.estimateFlowBlockHeight(
-					node,
-					columnWidth,
-					ctx,
-					skip,
-				);
-			} else if (isText(node) && node.data.trim()) {
-				// Loose top-level text has no reliable block context to
-				// estimate against; leave rows flexible rather than guess.
-				return;
+			} else if (isText(node)) {
+				if ((node.textContent || "").trim().length) {
+					return;
+				}
 			}
 			node = node.nextSibling;
 		}
 		if (firstHeight === null) {
-			// No top-level span lies ahead on this page.
 			return;
 		}
 		if (node === null && pendingSpanRef !== null) {
-			// The source ran out: close the final segment for the last span.
-			const line = ctx.maxLine || 16;
 			const h = this.segmentRowHeight(
 				segmentTotal,
-				count,
-				line,
+				columns.length,
+				ctx.maxLine || 16,
 				ctx.maxMargin,
 				available,
 				fill,
 			);
-			entries.push({
-				ref: pendingSpanRef,
-				height:
-					h < available - used - COLUMN_EPSILON ? h : null,
-			});
+			const fits = h < available - used - COLUMN_EPSILON;
+			queue.push({ ref: pendingSpanRef, height: fits ? h : null });
 		}
-		this.fixSegmentRowHeight(firstRow, firstHeight);
-		this.segmentHeightQueue = entries;
+		this.fixSegmentRowHeight(row, firstHeight);
+		this.segmentHeightQueue = queue;
 	}
 
 	/**
-	 * Estimates a column-segment row's natural height from the total height
-	 * of the content that will fill it.
-	 *
-	 * With `column-fill: auto` the content is stacked into the first column,
-	 * so the row only needs the content's own height (capped at the page's
-	 * available height — anything more overflows to the next page). With
-	 * `column-fill: balance` the content is spread evenly across the columns,
-	 * so the height is the total divided by the column count. Both are
-	 * rounded up to whole lines plus margin slop.
-	 *
-	 * @param {number} segmentTotal - Sum of the segment's block heights (px).
-	 * @param {number} count - Number of columns in the row.
-	 * @param {number} line - Largest line height seen in the segment.
-	 * @param {number} margin - Largest vertical margin seen in the segment.
-	 * @param {number} available - Page height available to column content.
-	 * @param {string} fill - `auto` or `balance`.
-	 * @returns {number} The row height in CSS px.
+	 * A segment row's height: the content's own height rounded up to whole
+	 * lines (capped at the page for auto fill) plus margin slop, or the
+	 * balanced share of it.
 	 */
 	private segmentRowHeight(
 		segmentTotal: number,
@@ -1392,11 +4106,10 @@ class Layout {
 		fill: string,
 	): number {
 		if (fill === "auto") {
-			const natural =
-				Math.ceil(segmentTotal / line) * line +
-				margin +
-				2 * COLUMN_EPSILON;
-			return Math.min(natural, available - COLUMN_EPSILON);
+			return Math.min(
+				Math.ceil(segmentTotal / line) * line + margin + 2 * COLUMN_EPSILON,
+				available - COLUMN_EPSILON,
+			);
 		}
 		return (
 			Math.ceil(segmentTotal / count / line) * line +
@@ -1406,21 +4119,9 @@ class Layout {
 	}
 
 	/**
-	 * Estimates the natural height of a source block laid out at the given
-	 * width, including its margins. Inline content is measured arithmetically
-	 * from font metrics (per inline run, so mixed formatting keeps its own
-	 * fonts); block children are recursed into; anything pretext cannot
-	 * model (tables, images, replaced elements, unmeasured styles) is
-	 * measured by cloning into the off-screen probe host. Footnote bodies
-	 * and hidden content are excluded — they render outside the columns.
-	 *
-	 * @param {Element} el - The source element (detached).
-	 * @param {number} width - The width it will be laid out at.
-	 * @param {Object} ctx - Estimation context (tracks the largest line
-	 *   height seen, for whole-line rounding by the caller).
-	 * @param {Node} [skipBefore] - When set, content before this node is not
-	 *   counted (the node resumes mid-block from a previous page).
-	 * @returns {number} The estimated height in CSS px.
+	 * Estimates a source block's natural height at `width`, including
+	 * margins: block children recurse, leaves measure their inline runs,
+	 * everything else probes.
 	 */
 	private estimateFlowBlockHeight(
 		el: Element,
@@ -1443,59 +4144,49 @@ class Layout {
 		const innerWidth = Math.max(4, width - rec.padBorderX);
 		let content = 0;
 		let hasBlockChildren = false;
-		for (const child of Array.from(el.children)) {
-			const childRec = child.dataset.ref
-				? elementMeasures.get(child.dataset.ref)
-				: undefined;
-			const isBlockChild = childRec
+		for (const childNode of Array.from(el.children)) {
+			const childRef = (childNode as HTMLElement).dataset?.ref;
+			const childRec = childRef ? elementMeasures.get(childRef) : undefined;
+			const isBlock = childRec
 				? childRec.block && childRec.display !== "none"
 				: true;
-			if (!isBlockChild) {
+			if (!isBlock) {
 				continue;
 			}
 			hasBlockChildren = true;
 			if (
 				skipBefore &&
-				!(skipBefore.compareDocumentPosition(child) &
-					Node.DOCUMENT_POSITION_FOLLOWING)
+				childNode !== skipBefore &&
+				!childNode.contains(skipBefore as Node) &&
+				childNode.compareDocumentPosition(skipBefore as Node) &
+					Node.DOCUMENT_POSITION_PRECEDING
 			) {
-				// Entirely before the resume point (or the resume point is
-				// inside it — then the text walk below picks up the rest).
-				if (child.contains(skipBefore)) {
-					content += this.estimateFlowBlockHeight(
-						child,
-						innerWidth,
-						ctx,
-						skipBefore,
-					);
-				}
 				continue;
 			}
-			content += this.estimateFlowBlockHeight(child, innerWidth, ctx);
+			content += this.estimateFlowBlockHeight(
+				childNode,
+				innerWidth,
+				ctx,
+				childNode.contains(skipBefore as Node) || childNode === skipBefore
+					? skipBefore
+					: undefined,
+			);
 		}
 		if (!hasBlockChildren) {
-			if (!el.textContent || !el.textContent.trim()) {
-				// Replaced or empty leaf (img, hr, br): measure exactly.
+			if (!(el.textContent || "").trim().length) {
 				return this.probeBlockHeight(el, width, ctx);
 			}
-			const height = measureInlineRunsHeight(
-				this.measure,
-				this.collectInlineRuns(el, skipBefore),
-				innerWidth,
-			);
-			if (height === null) {
+			const runs = this.collectInlineRuns(el, skipBefore);
+			const measured = measureInlineRunsHeight(this.measure, runs, innerWidth);
+			if (measured === null) {
 				return this.probeBlockHeight(el, width, ctx);
 			}
-			content = height;
+			content = measured;
 			if (rec.font) {
 				ctx.maxLine = Math.max(ctx.maxLine, rec.font.lineHeight);
 			}
 		}
-		ctx.maxMargin = Math.max(
-			ctx.maxMargin,
-			rec.marginTop,
-			rec.marginBottom,
-		);
+		ctx.maxMargin = Math.max(ctx.maxMargin, rec.marginTop, rec.marginBottom);
 		const margins = skipBefore
 			? rec.marginBottom
 			: rec.marginTop + rec.marginBottom;
@@ -1503,89 +4194,79 @@ class Layout {
 	}
 
 	/**
-	 * Collects the inline text of a block as runs sharing one font spec, so
-	 * mixed-format paragraphs are measured with each run's own font. Skips
-	 * footnote bodies (they render in the footnote area, not the column),
-	 * hidden elements, and script/style text.
-	 *
-	 * @param {Element} el - The block element.
-	 * @param {Node} [skipBefore] - Resume point; earlier text is excluded.
-	 * @returns {InlineRun[]} The runs in document order.
+	 * Gathers a block's flow text as font runs, skipping footnotes,
+	 * script/style and display-none subtrees; consecutive same-font runs
+	 * are merged. Text with no available spec at all is dropped.
 	 */
 	private collectInlineRuns(el: Element, skipBefore?: Node): InlineRun[] {
 		const runs: InlineRun[] = [];
-		const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
-			acceptNode: (node) => {
-				if (skipBefore && node !== skipBefore) {
-					const pos = skipBefore.compareDocumentPosition(node);
-					if (!(pos & Node.DOCUMENT_POSITION_FOLLOWING)) {
-						return NodeFilter.FILTER_REJECT;
-					}
-				}
-				for (
-					let p = node.parentElement;
-					p && p !== el;
-					p = p.parentElement
-				) {
-					if (
-						p.dataset.note === "footnote" ||
-						p.tagName === "SCRIPT" ||
-						p.tagName === "STYLE"
-					) {
-						return NodeFilter.FILTER_REJECT;
-					}
-					const rec = p.dataset.ref
-						? elementMeasures.get(p.dataset.ref)
-						: undefined;
-					if (rec && rec.display === "none") {
-						return NodeFilter.FILTER_REJECT;
-					}
-				}
-				return NodeFilter.FILTER_ACCEPT;
-			},
-		});
-		let current = walker.nextNode() as Text | null;
-		while (current) {
-			const spec = current.parentElement?.dataset.ref
-				? elementMeasures.get(current.parentElement.dataset.ref)?.font
-				: undefined;
-			const fallbackSpec = el instanceof HTMLElement && el.dataset.ref
-				? elementMeasures.get(el.dataset.ref)?.font
-				: undefined;
-			const runSpec = spec || fallbackSpec;
-			if (runSpec) {
-				const last = runs[runs.length - 1];
-				if (last && fontKey(last.spec) === fontKey(runSpec)) {
-					last.text += current.data;
-				} else {
-					runs.push({ text: current.data, spec: runSpec });
+		const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+		let textNode = walker.nextNode();
+		while (textNode) {
+			if (skipBefore && textNode !== skipBefore) {
+				const position = skipBefore.compareDocumentPosition(textNode);
+				if (position & Node.DOCUMENT_POSITION_PRECEDING) {
+					textNode = walker.nextNode();
+					continue;
 				}
 			}
-			current = walker.nextNode() as Text | null;
+			const parent = textNode.parentElement;
+			let skip = false;
+			let climber: Node | null = parent;
+			while (climber && climber !== el) {
+				if (isElement(climber)) {
+					const climbEl = climber as HTMLElement;
+					if (climbEl.dataset?.note === "footnote") {
+						skip = true;
+						break;
+					}
+					if (climbEl.nodeName === "SCRIPT" || climbEl.nodeName === "STYLE") {
+						skip = true;
+						break;
+					}
+					const climbRec = climbEl.dataset?.ref
+						? elementMeasures.get(climbEl.dataset.ref)
+						: undefined;
+					if (climbRec && climbRec.display === "none") {
+						skip = true;
+						break;
+					}
+				}
+				climber = climber.parentNode;
+			}
+			if (!skip && parent) {
+				const parentRef = (parent as HTMLElement).dataset?.ref;
+				const parentRec = parentRef ? elementMeasures.get(parentRef) : undefined;
+				const elRef = (el as HTMLElement).dataset?.ref;
+				const elRec = elRef ? elementMeasures.get(elRef) : undefined;
+				const spec = parentRec?.font || elRec?.font;
+				if (spec) {
+					const last = runs[runs.length - 1];
+					if (last && fontKey(last.spec) === fontKey(spec)) {
+						last.text += textNode.textContent || "";
+					} else {
+						runs.push({ text: textNode.textContent || "", spec });
+					}
+				}
+			}
+			textNode = walker.nextNode();
 		}
 		return runs;
 	}
 
 	/**
-	 * Measures a block's natural height by cloning it into the hidden probe
-	 * host at the target width. Cached per element and width; used for
-	 * content pretext cannot model (tables, images, replaced elements).
-	 *
-	 * @param {Element} el - The source element (detached).
-	 * @param {number} width - The width to measure at.
-	 * @returns {number} The measured height including margins, in CSS px.
+	 * Measures a block's natural height by cloning it into the probe host at
+	 * the given width; cached per ref and quantized width.
 	 */
 	private probeBlockHeight(
 		el: Element,
 		width: number,
 		ctx?: { maxLine: number; maxMargin: number },
 	): number {
-		const ref = (el as HTMLElement).dataset
-			? (el as HTMLElement).dataset.ref || ""
-			: "";
-		const key = `${ref} ${Math.round(width * 4)}`;
+		const ref = (el as HTMLElement).dataset?.ref || "";
+		const key = ref + " " + Math.round(width * 4);
 		const cached = segmentProbeCache.get(key);
-		if (cached !== undefined) {
+		if (cached) {
 			if (ctx) {
 				ctx.maxLine = Math.max(ctx.maxLine, cached.line);
 				ctx.maxMargin = Math.max(
@@ -1597,114 +4278,82 @@ class Layout {
 			return cached.height;
 		}
 		const host = getSegmentProbeHost();
-		host.style.width = `${Math.max(4, width)}px`;
+		host.style.width = Math.max(4, width) + "px";
 		const clone = el.cloneNode(true) as HTMLElement;
 		host.appendChild(clone);
-		let height = clone.offsetHeight;
-		const style = window.getComputedStyle(clone);
-		const marginTop = parseFloat(style.marginTop);
-		const marginBottom = parseFloat(style.marginBottom);
-		if (Number.isFinite(marginTop)) {
-			height += marginTop;
+		const style = getComputedStyle(clone);
+		const rawLine = parseFloat(style.lineHeight);
+		const fontSize = parseFloat(style.fontSize);
+		const line =
+			Number.isFinite(rawLine) && rawLine > 0
+				? rawLine
+				: (Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 16) * 1.14;
+		let marginTop = parseFloat(style.marginTop);
+		let marginBottom = parseFloat(style.marginBottom);
+		if (!Number.isFinite(marginTop)) {
+			marginTop = 0;
 		}
-		if (Number.isFinite(marginBottom)) {
-			height += marginBottom;
+		if (!Number.isFinite(marginBottom)) {
+			marginBottom = 0;
 		}
-		let line = parseFloat(style.lineHeight);
-		if (!Number.isFinite(line) || line <= 0) {
-			line = (parseFloat(style.fontSize) || 16) * 1.14;
-		}
-		const record = {
-			height,
-			line,
-			marginTop: Number.isFinite(marginTop) ? marginTop : 0,
-			marginBottom: Number.isFinite(marginBottom) ? marginBottom : 0,
-		};
-		if (ctx) {
-			ctx.maxLine = Math.max(ctx.maxLine, record.line);
-			ctx.maxMargin = Math.max(
-				ctx.maxMargin,
-				record.marginTop,
-				record.marginBottom,
-			);
-		}
+		const height = clone.offsetHeight;
 		clone.remove();
+		if (ctx) {
+			ctx.maxLine = Math.max(ctx.maxLine, line);
+			ctx.maxMargin = Math.max(ctx.maxMargin, marginTop, marginBottom);
+		}
 		if (segmentProbeCache.size >= 4096) {
 			segmentProbeCache.clear();
 		}
-		segmentProbeCache.set(key, record);
+		segmentProbeCache.set(key, { height, line, marginTop, marginBottom });
 		return height;
 	}
 
 	/**
-	 * Measures a block's post-extraction height: like probeBlockHeight, but
-	 * the clone's footnote subtrees are removed first, because they leave the
-	 * flow when the block renders. The footnote reserve prediction must see
-	 * the same heights the real walk lays out — the pretext estimate wraps at
-	 * a narrowed width and cannot hyphenate, so it fits less content than the
-	 * page will, under-counts the notes to reserve, and lets the footnote
-	 * area grow past the reserve mid-walk. Cached per element and width.
-	 *
-	 * @param {HTMLElement} block - The source block (detached).
-	 * @param {number} width - The width to measure at.
-	 * @returns The probe record: height including margins, plus the block's
-	 *   own margins for collapse-aware budget accumulation.
+	 * Like probeBlockHeight, but the clone's footnote subtrees are removed
+	 * first — they leave the flow when the block renders, and the
+	 * footnote-reserve prediction must see the same heights the real walk
+	 * lays out.
 	 */
 	private probeBlockHeightWithoutNotes(
 		block: HTMLElement,
 		width: number,
 	): { height: number; line: number; marginTop: number; marginBottom: number } {
-		const ref = block.dataset.ref || "";
-		const key = `${ref} nonotes ${Math.round(width * 4)}`;
+		const ref = block.dataset?.ref || "";
+		const key = ref + " nonotes " + Math.round(width * 4);
 		const cached = segmentProbeCache.get(key);
-		if (cached !== undefined) {
+		if (cached) {
 			return cached;
 		}
 		const host = getSegmentProbeHost();
-		host.style.width = `${Math.max(4, width)}px`;
+		host.style.width = Math.max(4, width) + "px";
 		const clone = block.cloneNode(true) as HTMLElement;
+		for (const note of clone.querySelectorAll("[data-note='footnote']")) {
+			note.remove();
+		}
 		clone.removeAttribute("id");
-		clone
-			.querySelectorAll("[data-note='footnote']")
-			.forEach((el) => el.remove());
 		host.appendChild(clone);
-		let height = clone.offsetHeight;
-		const style = window.getComputedStyle(clone);
-		const marginTop = parseFloat(style.marginTop);
-		const marginBottom = parseFloat(style.marginBottom);
-		if (Number.isFinite(marginTop)) {
-			height += marginTop;
+		const style = getComputedStyle(clone);
+		let marginTop = parseFloat(style.marginTop);
+		let marginBottom = parseFloat(style.marginBottom);
+		if (!Number.isFinite(marginTop)) {
+			marginTop = 0;
 		}
-		if (Number.isFinite(marginBottom)) {
-			height += marginBottom;
+		if (!Number.isFinite(marginBottom)) {
+			marginBottom = 0;
 		}
+		const height = clone.offsetHeight;
 		clone.remove();
 		if (segmentProbeCache.size >= 4096) {
 			segmentProbeCache.clear();
 		}
-		const record = {
-			height,
-			line: 0,
-			marginTop: Number.isFinite(marginTop) ? marginTop : 0,
-			marginBottom: Number.isFinite(marginBottom) ? marginBottom : 0,
-		};
-		segmentProbeCache.set(key, record);
-		return record;
+		segmentProbeCache.set(key, { height, line: 0, marginTop, marginBottom });
+		return { height, line: 0, marginTop, marginBottom };
 	}
 
 	/**
-	 * Per-column content extents of a segment row: for each column, the
-	 * distance from the row's top to the bottom of its content (0 when
-	 * empty). Used both to measure carried overflow before the walk and to
-	 * shrink a completed segment to its real content height.
-	 *
-	 * Range rects exclude margins, but a column's scroll height includes the
-	 * bottom margin of its last content, so the extent is extended to cover
-	 * it (margins collapse down the chain of last children: the deepest
-	 * bottom plus the largest margin along it).
-	 *
-	 * @param {HTMLElement} row - A `.paged_columns` row.
-	 * @returns {number[]} One extent per column, in CSS px.
+	 * Per column of a row, the distance from the column's top to the bottom
+	 * of its content.
 	 */
 	private columnContentExtents(row: HTMLElement): number[] {
 		return Array.from(
@@ -1713,32 +4362,56 @@ class Layout {
 	}
 
 	/**
-	 * Fixes a segment row at an explicit height so it no longer receives an
-	 * equal flex share of the flow host.
-	 *
-	 * @param {HTMLElement} row - A `.paged_columns` row.
-	 * @param {number} height - The height in CSS px.
-	 * @returns {void}
+	 * Distance from the container's top to the bottom of its content,
+	 * including the trailing margin of its deepest last child.
+	 */
+	private contentExtent(container: HTMLElement): number {
+		if (!container.hasChildNodes()) {
+			return 0;
+		}
+		const rect = container.getBoundingClientRect();
+		const top = rect.top;
+		const range = document.createRange();
+		range.selectNodeContents(container);
+		const rangeRect = range.getBoundingClientRect();
+		let rangeBottom = rangeRect.bottom;
+		if (rangeRect.top === 0 && rangeRect.bottom === 0) {
+			rangeBottom = 0;
+		}
+		let deepestBottom = 0;
+		let trailingMargin = 0;
+		let node: HTMLElement | null =
+			(container.lastElementChild as HTMLElement) || null;
+		while (node) {
+			deepestBottom = node.getBoundingClientRect().bottom;
+			const marginBottom = parseFloat(getComputedStyle(node).marginBottom);
+			if (Number.isFinite(marginBottom) && marginBottom > trailingMargin) {
+				trailingMargin = marginBottom;
+			}
+			node = (node.lastElementChild as HTMLElement) || null;
+		}
+		return Math.max(
+			0,
+			Math.max(rangeBottom, deepestBottom + trailingMargin) - top,
+		);
+	}
+
+	/**
+	 * Fixes a segment row's flex basis to the planned height and marks it
+	 * fixed so the balancer and deferral logic can tell.
 	 */
 	private fixSegmentRowHeight(row: HTMLElement, height: number): void {
-		row.style.flex = `0 0 ${Math.max(0, Math.ceil(height))}px`;
+		row.style.flex = "0 0 " + Math.max(0, Math.ceil(height)) + "px";
 		row.dataset.pagedSegmentFixed = "true";
 	}
 
 	/**
-	 * Shrinks a completed segment row to the height of its measured content
-	 * when that is less than its current height, freeing the difference for
-	 * the segment that follows. Never grows a row and never shrinks below
-	 * the content, so no re-flow is needed.
-	 *
-	 * @param {HTMLElement} row - The segment's `.paged_columns` row.
-	 * @returns {void}
+	 * Shrinks a completed segment row to its real content height; never
+	 * grows a row and never shrinks below the content.
 	 */
 	private shrinkCorrectSegmentRow(row: HTMLElement): void {
-		let needed = 0;
-		for (const extent of this.columnContentExtents(row)) {
-			needed = Math.max(needed, extent);
-		}
+		const extents = this.columnContentExtents(row);
+		const needed = extents.length ? Math.max(...extents) : 0;
 		if (needed <= 0) {
 			return;
 		}
@@ -1749,45 +4422,105 @@ class Layout {
 	}
 
 	/**
-	 * Reserves space for the footnotes this page will extract, before any
-	 * column content is filled.
-	 *
-	 * Footnote calls extract their notes while the walk renders their
-	 * paragraphs; each extraction grows the footnote area and shrinks every
-	 * column. When that happens after earlier columns are already filled,
-	 * the shrink spills laid-out text and the residual sweep moves whole
-	 * blocks to the next page — leaving pages with an empty trailing column.
-	 *
-	 * The page's upcoming content is therefore predicted arithmetically (the
-	 * same pretext-backed block estimates the segment planner uses), the
-	 * footnotes whose calls land on the page are collected, and their
-	 * rendered heights (probed once per note, marker included) are reserved
-	 * via `--paged-footnotes-height` up front. Because the prediction
-	 * depends on the reserve itself (less column space may push a footnote
-	 * call to the next page), the estimate iterates to a fixed point and
-	 * keeps the largest value seen — over-reserving only leaves a few
-	 * pixels of slack, while under-reserving reproduces the spill.
-	 *
-	 * The reserved value is recorded on the page area as
-	 * `data-paged-footnote-reserve`; the footnotes handler treats it as a
-	 * floor while the page is filled and releases the unused remainder when
-	 * the page is done.
-	 *
-	 * @param {HTMLElement} wrapper - The page's flow host.
-	 * @param {DocumentFragment|Node} source - The full source fragment.
-	 * @param {Node|undefined} start - The node the walk starts at.
-	 * @returns {void}
+	 * Consumes the planned segment height for a span node when the planner
+	 * saw it; spans the planner did not see keep their row flexible.
+	 */
+	private applyPlannedSegmentHeight(
+		node: Node,
+		newColumns: HTMLElement[],
+	): void {
+		const entry = this.segmentHeightQueue[0];
+		const nodeRef = (node as HTMLElement).dataset?.ref || "";
+		if (!entry || entry.ref !== nodeRef) {
+			return;
+		}
+		this.segmentHeightQueue.shift();
+		const row = newColumns[0]?.parentElement as HTMLElement | undefined;
+		if (!row || !row.classList.contains("paged_columns")) {
+			return;
+		}
+		const remaining = row.getBoundingClientRect().height;
+		const target = Math.min(entry.height ?? remaining, remaining);
+		if (target > COLUMN_EPSILON) {
+			this.fixSegmentRowHeight(row, target);
+		}
+	}
+
+	/**
+	 * Whether a span must wait for the next page: measured against the live
+	 * flow host, so it stays correct even when the planner's estimate was
+	 * off.
+	 */
+	private shouldDeferColumnSpan(wrapper: HTMLElement, node: Node): boolean {
+		if (!(node instanceof HTMLElement)) {
+			return false;
+		}
+		const rows = wrapper.querySelectorAll<HTMLElement>(
+			":scope > .paged_columns",
+		);
+		if (!rows.length) {
+			return false;
+		}
+		const lastRow = rows[rows.length - 1];
+		if (lastRow.dataset.pagedSegmentFixed !== "true") {
+			return false;
+		}
+		const remaining =
+			wrapper.getBoundingClientRect().bottom -
+			lastRow.getBoundingClientRect().bottom;
+		if (remaining <= COLUMN_EPSILON) {
+			return true;
+		}
+		const ctx = { maxLine: 0, maxMargin: 0 };
+		const spanHeight = this.estimateFlowBlockHeight(
+			node,
+			wrapper.getBoundingClientRect().width,
+			ctx,
+		);
+		const minRoom = (ctx.maxLine || 16) + 2 * COLUMN_EPSILON;
+		return remaining < spanHeight + minRoom;
+	}
+
+	/**
+	 * Releases the page's final segment row back to flexible sizing so it
+	 * absorbs the leftover space; rows closed by a following span keep
+	 * their measured height.
+	 */
+	private relaxFinalSegmentRow(wrapper: HTMLElement): void {
+		const rows = wrapper.querySelectorAll<HTMLElement>(
+			":scope > .paged_columns",
+		);
+		if (!rows.length) {
+			return;
+		}
+		const lastRow = rows[rows.length - 1];
+		if (lastRow.dataset.pagedSegmentFixed) {
+			lastRow.style.flex = "";
+			delete lastRow.dataset.pagedSegmentFixed;
+		}
+	}
+
+	/**
+	 * Predicts, before content is laid out, how much space the page's
+	 * upcoming footnotes need and reserves it via the
+	 * --paged-footnotes-height custom property on the page area.
 	 */
 	private reserveFootnoteAreaHeight(
 		wrapper: HTMLElement,
 		source: DocumentFragment | Node,
 		start: Node | undefined,
 	): void {
-		if (!start || !measurementCapabilities() || !elementMeasures.size) {
+		if (!start) {
+			return;
+		}
+		if (!measurementCapabilities()) {
+			return;
+		}
+		if (!elementMeasures.size) {
 			return;
 		}
 		const area = wrapper.closest(".paged_area") as HTMLElement | null;
-		if (!area || area.dataset.pagedFootnoteReserve !== undefined) {
+		if (!area || area.dataset.pagedFootnoteReserve) {
 			return;
 		}
 		const noteContent = area.querySelector(
@@ -1799,48 +4532,40 @@ class Layout {
 		if (!noteContent || !noteInner) {
 			return;
 		}
-
 		const columns = this.flowColumns(wrapper);
-		const count = columns.length;
-		const columnWidth =
-			count > 1
-				? columns[0].getBoundingClientRect().width
-				: wrapper.clientWidth;
-		if (!(columnWidth > 8)) {
+		let columnWidth: number;
+		if (columns.length > 1) {
+			columnWidth = columns[0].getBoundingClientRect().width;
+		} else {
+			columnWidth = wrapper.clientWidth;
+		}
+		if (columnWidth <= 8) {
 			return;
 		}
-
 		const flowH = wrapper.getBoundingClientRect().height;
-		if (!(flowH > 0)) {
+		if (flowH <= 0) {
 			return;
 		}
-
-		// Space already taken above the columns: placed top page floats
-		// (deferred ones land here before the layout) and the bottom-float
-		// spacer. Pending top floats are deliberately not probed: assuming
-		// they defer can only over-predict the page's content, which
-		// over-reserves by a note or two — assuming they place could
-		// under-reserve when they in fact defer.
-		const floatTop = wrapper.querySelector(
-			":scope > .paged_float_top",
-		) as HTMLElement | null;
-		const spacer = wrapper.querySelector(
-			":scope > .paged_float_spacer",
-		) as HTMLElement | null;
-		const placedFloatH =
-			(floatTop ? floatTop.getBoundingClientRect().height : 0) +
-			(spacer ? spacer.getBoundingClientRect().height : 0);
+		let placedFloatH = 0;
+		for (const float of wrapper.querySelectorAll(
+			":scope > .paged_float_top, :scope > .paged_float_spacer",
+		)) {
+			placedFloatH += float.getBoundingClientRect().height;
+		}
 		const rowH0 = flowH - placedFloatH;
-		if (!(rowH0 > 0)) {
+		if (rowH0 <= 0) {
 			return;
 		}
-
+		const count = this.rootColumns ? this.rootColumns.count : 1;
 		const used = this.currentUsedColumnHeight(wrapper, count, rowH0);
+		const budgetBase = count * rowH0 - used;
+		if (budgetBase <= 0) {
+			return;
+		}
+		const chrome = this.footnoteChrome(noteContent);
 		const probeWidth =
 			noteInner.clientWidth || noteContent.clientWidth || columnWidth;
-		const chrome = this.footnoteChrome(noteContent);
-
-		// The top-level source node the walk starts in (or at).
+		const flowWidth = wrapper.getBoundingClientRect().width;
 		let topStart: Node | null = start;
 		while (topStart && topStart.parentNode !== source) {
 			topStart = topStart.parentNode;
@@ -1848,19 +4573,6 @@ class Layout {
 		if (!topStart) {
 			return;
 		}
-
-		const budgetBase = count * rowH0 - used;
-		if (budgetBase <= 0) {
-			return;
-		}
-
-		// Binary search for the minimal safe reserve. Applying reserve R
-		// leaves `budgetBase - count * R` of content for the columns; the
-		// notes whose calls land there must fit within R (plus the area's
-		// chrome). Extraction is weakly decreasing in R, so the predicate
-		// is monotone and the search converges on the tight value: any
-		// smaller reserve under-covers the extraction and would grow the
-		// footnote area after the columns are filled, spilling their text.
 		const extractionAt = (reserve: number): number => {
 			const budget = budgetBase - count * reserve;
 			if (budget <= 0) {
@@ -1868,30 +4580,21 @@ class Layout {
 			}
 			return this.predictFootnoteReserve(
 				source,
-				topStart,
-				start,
+				topStart as Node,
+				start as Node,
 				columnWidth,
-				wrapper.getBoundingClientRect().width,
+				flowWidth,
 				budget,
 				probeWidth,
 			);
 		};
-
 		const fullExtraction = extractionAt(0);
-		if (fullExtraction < 0) {
-			// The upcoming content cannot be modelled (loose top-level
-			// text); leave the layout to the residual machinery.
+		if (fullExtraction < 0 || fullExtraction === 0) {
 			return;
 		}
-		if (fullExtraction === 0) {
-			return;
-		}
-		// The extraction of the full budget, plus chrome, always covers its
-		// own extraction at the reduced budget (extraction is weakly
-		// decreasing), so the upper bound is safe from the start.
 		let lo = 0;
 		let hi = fullExtraction + chrome;
-		for (let iteration = 0; iteration < 10 && hi - lo > 0.5; iteration++) {
+		for (let i = 0; i < 10 && hi - lo > 0.5; i++) {
 			const mid = (lo + hi) / 2;
 			const extraction = extractionAt(mid);
 			if (extraction < 0) {
@@ -1903,51 +4606,43 @@ class Layout {
 				lo = mid;
 			}
 		}
-		const reserve = hi;
-		if (reserve <= 0) {
+		if (hi <= 0) {
 			return;
 		}
-
-		// Pathological inputs (footnotes nearly as tall as the page) must
-		// keep a sliver of column space rather than producing an empty page.
-		let appliedReserve = reserve;
-		if (flowH - placedFloatH - appliedReserve < 24) {
-			appliedReserve = Math.max(0, flowH - placedFloatH - 24);
+		// The balance point itself is the space to reserve: at `hi` the
+		// prediction is self-consistent — with the budget the page keeps
+		// after giving up `hi`, exactly the notes counted at `hi` (plus the
+		// area chrome) fit into `hi`. Reserving anything less re-opens
+		// budget the prediction did not account for, so more calls land on
+		// the page than were reserved for and the area overflows.
+		let appliedReserve = Math.ceil(hi);
+		if (appliedReserve <= 0) {
+			return;
+		}
+		const current = parseFloat(
+			area.style.getPropertyValue("--paged-footnotes-height"),
+		);
+		const currentUsed = Number.isFinite(current) ? current : 0;
+		if (flowH - placedFloatH - currentUsed - appliedReserve < 24) {
+			appliedReserve = Math.max(0, flowH - placedFloatH - 24 - currentUsed);
 			if (appliedReserve <= 0) {
 				return;
 			}
 		}
-
-		const current = parseFloat(
-			area.style.getPropertyValue("--paged-footnotes-height"),
+		area.style.setProperty(
+			"--paged-footnotes-height",
+			Math.ceil(currentUsed + appliedReserve) + "px",
 		);
-		const reserved = Math.ceil(
-			(Number.isFinite(current) ? current : 0) + appliedReserve,
+		area.dataset.pagedFootnoteReserve = String(
+			Math.ceil(currentUsed + appliedReserve),
 		);
-		area.style.setProperty("--paged-footnotes-height", `${reserved}px`);
-		area.dataset.pagedFootnoteReserve = String(reserved);
 		this.invalidateBounds();
 	}
 
 	/**
 	 * Sums the rendered heights of the footnotes whose calls will land on
-	 * this page, walking the upcoming top-level source blocks against the
-	 * page's content budget.
-	 *
-	 * Fully fitting blocks contribute all their notes; the one block that
-	 * straddles the page boundary contributes only the notes whose calls sit
-	 * before the predicted split (uniform-font blocks get the exact line
-	 * offset from pretext, mixed-font blocks a proportional one; unmodellable
-	 * blocks conservatively contribute all their notes). Returns -1 when the
-	 * walk hits loose top-level text, which has no reliable block context.
-	 *
-	 * @param {DocumentFragment|Node} source - The full source fragment.
-	 * @param {Node} topStart - The top-level node the walk starts in or at.
-	 * @param {Node} start - The exact resume node (may sit inside topStart).
-	 * @param {number} columnWidth - The width blocks are laid out at.
-	 * @param {number} budget - Total column space on the page, in px.
-	 * @param {number} probeWidth - Width to probe footnote heights at.
-	 * @returns {number} The summed note heights (without area chrome), or -1.
+	 * the page, walking the upcoming top-level source blocks against the
+	 * budget. A non-whitespace text node makes the region unmodellable (-1).
 	 */
 	private predictFootnoteReserve(
 		source: DocumentFragment | Node,
@@ -1958,75 +4653,63 @@ class Layout {
 		budget: number,
 		probeWidth: number,
 	): number {
-		let consumed = 0;
 		let total = 0;
+		let consumed = 0;
 		let prevMargin = 0;
 		let node: Node | null = topStart;
 		while (node) {
-			if (node instanceof HTMLElement) {
-				if (consumed > 0 && needsBreakBefore(node)) {
-					// A forced page break ends the predictable region.
+			if (isElement(node)) {
+				const el = node as HTMLElement;
+				if (needsBreakBefore(el) && consumed > 0) {
 					break;
 				}
 				const skip =
 					node === topStart && start !== topStart ? start : undefined;
-				// Real layout height: probe the block as the browser will
-				// wrap it (hyphenation, justification, footnotes stripped),
-				// instead of the pretext estimate — an over-estimate here
-				// fits fewer blocks than the page really will and
-				// under-counts the notes to reserve. The walk's first block
-				// is the exception: a continuation resume point splits it,
-				// and the probe can only measure the whole source element,
-				// so for it the estimate (which honors the resume point)
-				// stays in use.
-				const probe =
-					skip !== undefined
-						? null
-						: this.probeBlockHeightWithoutNotes(node, columnWidth);
-				const marginT = probe ? probe.marginTop : 0;
-				const marginB = probe ? probe.marginBottom : 0;
-				const boxH = probe
-					? Math.max(0, probe.height - marginT - marginB)
-					: this.estimateFlowBlockHeight(
-							node,
-							columnWidth,
-							{ maxLine: 0, maxMargin: 0 },
-							skip,
-						);
-				// Page floats inside the block render outside the columns;
-				// subtract their probed heights so they are not counted as
-				// flow content (their space above the columns is not part of
-				// the prediction — see reserveFootnoteAreaHeight).
-				let flowH = boxH;
-				const floats = this.floatElementsIn(node);
-				if (floats.length) {
-					for (const float of floats) {
-						flowH = Math.max(
-							0,
-							flowH - this.probeBlockHeight(float, flowWidth),
-						);
-					}
+				let boxH: number;
+				let marginT = 0;
+				let marginB = 0;
+				if (skip) {
+					const ctx = { maxLine: 0, maxMargin: 0 };
+					boxH = this.estimateFlowBlockHeight(el, columnWidth, ctx, skip);
+					const rec = el.dataset.ref
+						? elementMeasures.get(el.dataset.ref)
+						: undefined;
+					marginT = rec ? rec.marginTop : 0;
+					marginB = rec ? rec.marginBottom : 0;
+				} else {
+					const probe = this.probeBlockHeightWithoutNotes(el, columnWidth);
+					boxH = Math.max(
+						0,
+						probe.height - probe.marginTop - probe.marginBottom,
+					);
+					marginT = probe.marginTop;
+					marginB = probe.marginBottom;
 				}
-				// Margins collapse between siblings in the real columns;
-				// summing both sides would over-consume the budget.
-				const outer = Math.max(prevMargin, marginT) + flowH;
+				for (const float of this.floatElementsIn(el)) {
+					boxH = Math.max(
+						0,
+						boxH - this.probeBlockHeight(float, flowWidth),
+					);
+				}
 				const remaining = budget - consumed;
+				const outer = Math.max(prevMargin, marginT) + boxH;
 				if (outer <= remaining + COLUMN_EPSILON) {
 					consumed += outer;
 					prevMargin = marginB;
-					total += this.estimateBlockNoteReserve(
-						node,
+					const noteReserve = this.estimateBlockNoteReserve(
+						el,
 						Infinity,
-						flowH,
+						boxH,
 						columnWidth,
 						probeWidth,
 						skip,
 					);
+					total += noteReserve;
 				} else if (remaining - Math.max(prevMargin, marginT) > 0) {
 					total += this.estimateBlockNoteReserve(
-						node,
+						el,
 						remaining - Math.max(prevMargin, marginT),
-						flowH,
+						boxH,
 						columnWidth,
 						probeWidth,
 						skip,
@@ -2035,8 +4718,10 @@ class Layout {
 				} else {
 					break;
 				}
-			} else if (isText(node) && node.data.trim()) {
-				return -1;
+			} else if (isText(node)) {
+				if ((node.textContent || "").trim().length) {
+					return -1;
+				}
 			}
 			node = node.nextSibling;
 		}
@@ -2044,17 +4729,8 @@ class Layout {
 	}
 
 	/**
-	 * Rendered heights of a block's footnotes, optionally limited to the
-	 * calls that sit before the block's predicted split point.
-	 *
-	 * @param {HTMLElement} block - The source block.
-	 * @param {number} remaining - Column space left on the page (px), or
-	 *   Infinity when the block fits entirely.
-	 * @param {number} blockHeight - The block's estimated outer height.
-	 * @param {number} columnWidth - The width blocks are laid out at.
-	 * @param {number} probeWidth - Width to probe note heights at.
-	 * @param {Node} [skipBefore] - Resume point; earlier notes are excluded.
-	 * @returns {number} The summed note heights in px.
+	 * Sums the heights of a block's footnotes whose calls land before the
+	 * predicted split offset.
 	 */
 	private estimateBlockNoteReserve(
 		block: HTMLElement,
@@ -2070,62 +4746,45 @@ class Layout {
 		if (!notes.length) {
 			return 0;
 		}
-
-		let limitOffset = Infinity;
-		if (remaining !== Infinity) {
-			const usable = runs.filter((run) => run.text.trim().length);
-			if (usable.length) {
-				const contentHeight = measureInlineRunsHeight(
-					this.measure,
-					runs,
-					columnWidth,
-				);
-				if (contentHeight !== null && contentHeight > 0) {
-					const lineH = Math.max(
-						1,
-						...usable.map((run) => run.spec.lineHeight),
+		let limitOffset: number;
+		if (Number.isFinite(remaining)) {
+			const measured = measureInlineRunsHeight(this.measure, runs, columnWidth);
+			if (measured !== null && measured > 0) {
+				let lineH = 1;
+				for (const run of runs) {
+					lineH = Math.max(lineH, run.spec.lineHeight);
+				}
+				const contentSpace = remaining - Math.max(0, blockHeight - measured);
+				const fitLines = contentSpace > 0 ? Math.floor(contentSpace / lineH) : 0;
+				const totalLines = Math.max(1, Math.ceil(measured / lineH));
+				if (fitLines >= totalLines) {
+					limitOffset = Infinity;
+				} else if (fitLines <= 0) {
+					limitOffset = -1;
+				} else {
+					const fullText = runs.map((run) => run.text).join("");
+					const uniform = runs.every(
+						(run) => fontKey(run.spec) === fontKey(runs[0].spec),
 					);
-					// Space for the block's inline content after its own
-					// chrome (padding, border, margins) is accounted for.
-					const contentSpace =
-						remaining - Math.max(0, blockHeight - contentHeight);
-					const fitLines =
-						contentSpace > 0
-							? Math.floor(contentSpace / lineH)
-							: 0;
-					const totalLines = Math.max(
-						1,
-						Math.ceil(contentHeight / lineH),
-					);
-					if (fitLines >= totalLines) {
-						// The chrome rounding ate the overflow: all fits.
-					} else if (fitLines <= 0) {
-						limitOffset = -1;
-					} else {
-						const fullText = usable
-							.map((run) => run.text)
-							.join("");
-						const uniform = usable.every(
-							(run) =>
-								fontKey(run.spec) === fontKey(usable[0].spec),
+					if (uniform) {
+						limitOffset = this.offsetAtLine(
+							fullText,
+							runs[0].spec,
+							columnWidth,
+							fitLines,
 						);
-						limitOffset = uniform
-							? this.offsetAtLine(
-									fullText,
-									usable[0].spec,
-									columnWidth,
-									fitLines,
-								)
-							: Math.floor(
-									(fullText.length * fitLines) / totalLines,
-								);
+					} else {
+						limitOffset = Math.floor(
+							(fullText.length * fitLines) / totalLines,
+						);
 					}
 				}
-				// Unmeasurable or probed content keeps limitOffset at
-				// Infinity: conservatively count every note in the block.
+			} else {
+				limitOffset = Infinity;
 			}
+		} else {
+			limitOffset = Infinity;
 		}
-
 		let total = 0;
 		for (const note of notes) {
 			if (note.offset < limitOffset) {
@@ -2136,98 +4795,77 @@ class Layout {
 	}
 
 	/**
-	 * Walks a block's flow text (mirroring collectInlineRuns' filters) while
-	 * recording the flow-text offset of every footnote it passes, so notes
-	 * can be classified against a predicted split offset.
-	 *
-	 * @param {Element} el - The block element.
-	 * @param {Node} [skipBefore] - Resume point; earlier content is excluded.
-	 * @param {InlineRun[]} runs - Output: the flow text as font runs.
-	 * @param {Array<{offset: number, el: HTMLElement}>} notes - Output: the
-	 *   footnotes with their flow-text offsets.
-	 * @returns {void}
+	 * Recursive walk gathering a block's flow text as font runs plus every
+	 * footnote element with its flow-text offset; mirrors collectInlineRuns'
+	 * filters.
 	 */
 	private collectFlowTextAndNotes(
 		el: Element,
 		skipBefore: Node | undefined,
 		runs: InlineRun[],
 		notes: Array<{ offset: number; el: HTMLElement }>,
+		inheritedSpec?: FontSpec | null,
 	): void {
-		const visit = (element: Element, inherited: FontSpec | null): void => {
-			for (const child of Array.from(element.childNodes)) {
-				if (isText(child)) {
-					if (
-						skipBefore &&
-						child !== skipBefore &&
-						!(skipBefore.compareDocumentPosition(child) &
-							Node.DOCUMENT_POSITION_FOLLOWING)
-					) {
+		for (const childNode of Array.from(el.childNodes)) {
+			if (isText(childNode)) {
+				if (skipBefore && childNode !== skipBefore) {
+					const position = skipBefore.compareDocumentPosition(childNode);
+					if (position & Node.DOCUMENT_POSITION_PRECEDING) {
 						continue;
 					}
-					const spec =
-						(element.dataset.ref
-							? elementMeasures.get(element.dataset.ref)?.font
-							: undefined) || inherited;
-					if (spec) {
-						const last = runs[runs.length - 1];
-						if (last && fontKey(last.spec) === fontKey(spec)) {
-							last.text += child.data;
-						} else {
-							runs.push({ text: child.data, spec });
-						}
-					}
-				} else if (isElement(child)) {
-					const childEl = child as HTMLElement;
-					if (childEl.dataset.note === "footnote") {
-						if (
-							!skipBefore ||
-							childEl === skipBefore ||
-							(skipBefore.compareDocumentPosition(childEl) &
-								Node.DOCUMENT_POSITION_FOLLOWING)
-						) {
-							let offset = 0;
-							for (const run of runs) {
-								offset += run.text.length;
-							}
-							notes.push({ offset, el: childEl });
-						}
-						continue;
-					}
-					if (
-						childEl.tagName === "SCRIPT" ||
-						childEl.tagName === "STYLE"
-					) {
-						continue;
-					}
-					const rec = childEl.dataset.ref
-						? elementMeasures.get(childEl.dataset.ref)
-						: undefined;
-					if (rec && rec.display === "none") {
-						continue;
-					}
-					visit(childEl, (rec && rec.font) || inherited);
 				}
+				const parent = childNode.parentElement;
+				let spec: FontSpec | null | undefined = inheritedSpec;
+				if (parent) {
+					const parentRef = (parent as HTMLElement).dataset?.ref;
+					const parentRec = parentRef
+						? elementMeasures.get(parentRef)
+						: undefined;
+					if (parentRec) {
+						spec = parentRec.font;
+					}
+				}
+				if (spec) {
+					const last = runs[runs.length - 1];
+					if (last && fontKey(last.spec) === fontKey(spec)) {
+						last.text += childNode.textContent || "";
+					} else {
+						runs.push({ text: childNode.textContent || "", spec });
+					}
+				}
+			} else if (isElement(childNode)) {
+				const childEl = childNode as HTMLElement;
+				if (childEl.nodeName === "SCRIPT" || childEl.nodeName === "STYLE") {
+					continue;
+				}
+				const rec = childEl.dataset?.ref
+					? elementMeasures.get(childEl.dataset.ref)
+					: undefined;
+				if (rec && rec.display === "none") {
+					continue;
+				}
+				if (childEl.dataset?.note === "footnote") {
+					let offset = 0;
+					for (const run of runs) {
+						offset += run.text.length;
+					}
+					notes.push({ offset, el: childEl });
+					continue;
+				}
+				this.collectFlowTextAndNotes(
+					childEl,
+					skipBefore,
+					runs,
+					notes,
+					rec ? rec.font : inheritedSpec,
+				);
 			}
-		};
-		visit(
-			el,
-			(el.dataset.ref
-				? elementMeasures.get(el.dataset.ref)?.font
-				: undefined) ?? null,
-		);
+		}
 	}
 
 	/**
-	 * Flow-text offset just past the given line, when the text is laid out
-	 * at the given width. Line counts use the same narrowed width as
-	 * measureInlineRunsHeight so both agree on where the block wraps.
-	 *
-	 * @param {string} text - The block's flow text.
-	 * @param {FontSpec} spec - The (uniform) font specification.
-	 * @param {number} width - The layout width.
-	 * @param {number} lines - The number of lines that fit.
-	 * @returns {number} The offset ending the last fitted line; the full
-	 *   text length when the text cannot be measured (conservative).
+	 * The flow-text offset just past the given line when wrapped at 0.95x
+	 * the width; conservative text.length on any failure.
 	 */
 	private offsetAtLine(
 		text: string,
@@ -2237,72 +4875,95 @@ class Layout {
 	): number {
 		try {
 			const prepared = this.measure.prepare(text, spec);
-			const lineWidth = width * 0.95;
-			let end = 0;
+			const safeWidth = Math.max(width * 0.95, 1);
+			let recorded: number | null = null;
 			let count = 0;
-			this.measure.walkLines(
-				prepared,
-				lineWidth,
-				lineWidth,
-				(line) => {
-					end = this.measure.cursorToOffset(prepared, line.end);
-					return ++count >= lines ? false : undefined;
-				},
-			);
-			return count >= lines ? end : text.length;
+			this.measure.walkLines(prepared, safeWidth, safeWidth, (line) => {
+				recorded = this.measure.cursorToOffset(prepared, line.end);
+				count++;
+				if (count >= lines) {
+					return false;
+				}
+			});
+			return count >= lines && recorded !== null ? recorded : text.length;
 		} catch {
 			return text.length;
 		}
 	}
 
 	/**
-	 * Rendered height of a footnote in the footnote area, probed by cloning
-	 * it into the off-screen probe host at the note width. The clone is
-	 * marked as a footnote marker so the list-item display and the rendered
-	 * `::marker` ("N. ") are part of the measurement, matching the real
-	 * extraction. Cached per note and width.
-	 *
-	 * @param {HTMLElement} note - The source footnote element.
-	 * @param {number} width - The footnote area's content width.
-	 * @returns {number} The note's outer height in px.
+	 * Rendered height of one footnote, probed by cloning into a replica of
+	 * the page's footnote area (so the area-scoped base styles and the
+	 * marker styles apply exactly as they will in the real area) with its
+	 * list-item marker applied.
 	 */
 	private estimateNoteHeight(note: HTMLElement, width: number): number {
-		const ref = note.dataset.ref || "";
-		const key = `${ref}\u0000note\u0000${Math.round(width * 4)}`;
+		const ref = note.dataset?.ref || "";
+		const key = ref + "\u0000note\u0000" + Math.round(width * 4);
 		const cached = segmentProbeCache.get(key);
 		if (cached) {
 			return cached.height;
 		}
 		const host = getSegmentProbeHost();
-		host.style.width = `${Math.max(4, width)}px`;
+		host.style.width = Math.max(4, width) + "px";
+		const replica = document.createElement("div");
+		replica.setAttribute(
+			"style",
+			"position: static; visibility: visible; overflow: visible; height: auto; left: 0px; top: 0px; width: " +
+				Math.max(4, width) +
+				"px;",
+		);
+		replica.className = "paged_pagebox";
+		replica.style.setProperty("--paged-pagebox-width", Math.max(4, width) + "px");
+		replica.style.setProperty("--paged-pagebox-height", "auto");
+		replica.style.setProperty("--paged-margin-left", "0px");
+		replica.style.setProperty("--paged-margin-right", "0px");
+		replica.style.setProperty("--paged-margin-top", "0px");
+		replica.style.setProperty("--paged-margin-bottom", "0px");
+		replica.style.setProperty("--paged-bleed-left", "0px");
+		replica.style.setProperty("--paged-bleed-right", "0px");
+		const area = document.createElement("div");
+		area.className = "paged_area";
+		const footnoteArea = document.createElement("div");
+		footnoteArea.className = "paged_footnote_area";
+		footnoteArea.style.height = "auto";
+		const noteContent = document.createElement("div");
+		noteContent.className = "paged_footnote_content";
+		const noteInner = document.createElement("div");
+		noteInner.className = "paged_footnote_inner_content";
+		noteInner.style.columnWidth = Math.max(4, width) + "px";
+		noteInner.style.columnGap = "0px";
+		noteContent.appendChild(noteInner);
+		footnoteArea.appendChild(noteContent);
+		area.appendChild(footnoteArea);
+		replica.appendChild(area);
+		host.appendChild(replica);
 		const clone = note.cloneNode(true) as HTMLElement;
 		clone.removeAttribute("id");
-		if (clone.dataset.ref) {
+		if (clone.dataset?.ref) {
 			clone.setAttribute("data-footnote-marker", clone.dataset.ref);
 		}
-		host.appendChild(clone);
-		let height = clone.offsetHeight;
-		const style = window.getComputedStyle(clone);
-		height += parseFloat(style.marginTop) || 0;
-		height += parseFloat(style.marginBottom) || 0;
-		clone.remove();
+		noteInner.appendChild(clone);
+		let marginTop = parseFloat(getComputedStyle(clone).marginTop);
+		let marginBottom = parseFloat(getComputedStyle(clone).marginBottom);
+		if (!Number.isFinite(marginTop)) {
+			marginTop = 0;
+		}
+		if (!Number.isFinite(marginBottom)) {
+			marginBottom = 0;
+		}
+		const height = noteInner.scrollHeight;
+		replica.remove();
 		if (segmentProbeCache.size >= 4096) {
 			segmentProbeCache.clear();
 		}
-		segmentProbeCache.set(key, {
-			height,
-			line: 0,
-			marginTop: 0,
-			marginBottom: 0,
-		});
+		segmentProbeCache.set(key, { height, line: 0, marginTop, marginBottom: 0 });
 		return height;
 	}
 
 	/**
-	 * Page-float elements within a source node (the node itself included).
-	 *
-	 * @param {Node} node - The source node.
-	 * @returns {HTMLElement[]} The float elements, possibly empty.
+	 * The page floats inside a node: the node itself when it carries the
+	 * marker, else all marked descendants.
 	 */
 	private floatElementsIn(node: Node): HTMLElement[] {
 		if (!(node instanceof HTMLElement)) {
@@ -2311,21 +4972,12 @@ class Layout {
 		if (node.dataset.pageFloat) {
 			return [node];
 		}
-		return Array.from(
-			node.querySelectorAll<HTMLElement>("[data-page-float]"),
-		);
+		return Array.from(node.querySelectorAll<HTMLElement>("[data-page-float]"));
 	}
 
 	/**
-	 * Height of the flow content already rebuilt into the page's columns by
-	 * addOverflowToPage (the previous page's carried overflow), in the
-	 * sequential-fill coordinate space: a non-empty column k implies columns
-	 * 0..k-1 are full.
-	 *
-	 * @param {HTMLElement} wrapper - The page's flow host.
-	 * @param {number} count - The number of columns.
-	 * @param {number} rowH - The current height of one column.
-	 * @returns {number} The used content height in px.
+	 * Height of flow content already rebuilt into the page's columns, in
+	 * the sequential-fill coordinate space.
 	 */
 	private currentUsedColumnHeight(
 		wrapper: HTMLElement,
@@ -2335,661 +4987,55 @@ class Layout {
 		if (count <= 1) {
 			return this.contentExtent(wrapper);
 		}
-		const rows = wrapper.querySelectorAll(":scope > .paged_columns");
-		const row = rows[rows.length - 1] as HTMLElement | null;
-		if (!row) {
+		const rows = wrapper.querySelectorAll<HTMLElement>(
+			":scope > .paged_columns",
+		);
+		if (!rows.length) {
 			return 0;
 		}
-		let used = 0;
-		const columns = Array.from(
-			row.querySelectorAll<HTMLElement>(":scope > .paged_column"),
+		const lastRow = rows[rows.length - 1];
+		const columns = lastRow.querySelectorAll<HTMLElement>(
+			":scope > .paged_column",
 		);
-		columns.forEach((column, index) => {
-			const extent = this.contentExtent(column);
-			if (extent > 0) {
-				used = Math.max(used, index * rowH + extent);
+		let used = 0;
+		let index = 0;
+		for (const column of columns) {
+			if (column.hasChildNodes()) {
+				used = Math.max(used, index * rowH + this.contentExtent(column));
 			}
-		});
+			index++;
+		}
 		return used;
 	}
 
 	/**
-	 * Bottom slack the walk's break verification grants the deepest content
-	 * of a container: the summed bottom margin, padding and border of the
-	 * chain of last elements (the same allowance textBreak computes via
-	 * getAncestorPaddingBorderAndMarginSums when it accepts a line whose box
-	 * ends inside its parent's bottom margin zone).
-	 *
-	 * @param {HTMLElement} container - The column or flow host.
-	 * @returns {number} The trailing slack in px.
-	 */
-	private trailingBottomSlack(container: HTMLElement): number {
-		let slack = 0;
-		for (
-			let el = container.lastElementChild as HTMLElement | null;
-			el;
-			el = el.lastElementChild as HTMLElement | null
-		) {
-			const style = window.getComputedStyle(el);
-			const px = (value: string) => {
-				const parsed = parseFloat(value);
-				return Number.isFinite(parsed) ? parsed : 0;
-			};
-			slack +=
-				px(style.marginBottom) +
-				px(style.paddingBottom) +
-				px(style.borderBottomWidth);
-		}
-		return slack;
-	}
-
-	/**
-	 * Distance from a container's top to the bottom of its content,
-	 * including the trailing margin of its deepest last child (range rects
-	 * exclude margins). Shared by the column-extent and carried-content
-	 * measurements.
-	 *
-	 * @param {HTMLElement} container - The column or flow host to measure.
-	 * @returns {number} The content extent in px, 0 when empty.
-	 */
-	private contentExtent(container: HTMLElement): number {
-		if (!container.firstChild) {
-			return 0;
-		}
-		const containerTop = container.getBoundingClientRect().top;
-		const range = document.createRange();
-		range.selectNodeContents(container);
-		const rect = range.getBoundingClientRect();
-		let bottom =
-			rect && (rect.bottom !== 0 || rect.top !== 0) ? rect.bottom : 0;
-		let deepest = 0;
-		let trailingMargin = 0;
-		for (
-			let last = container.lastElementChild;
-			last;
-			last = last.lastElementChild
-		) {
-			deepest = Math.max(deepest, last.getBoundingClientRect().bottom);
-			const margin = parseFloat(
-				window.getComputedStyle(last).marginBottom,
-			);
-			if (Number.isFinite(margin)) {
-				trailingMargin = Math.max(trailingMargin, margin);
-			}
-		}
-		bottom = Math.max(bottom, deepest + trailingMargin);
-		return Math.max(0, bottom - containerTop);
-	}
-
-	/**
-	 * Vertical chrome (margins, padding, borders) the footnote content box
-	 * adds around the notes, matching what recalcFootnotesHeight adds when
-	 * it sizes the area from actual content.
-	 *
-	 * @param {HTMLElement} noteContent - The `.paged_footnote_content` box.
-	 * @returns {number} The chrome height in px.
+	 * The vertical margin/padding/border chrome the footnote content box
+	 * adds around notes.
 	 */
 	private footnoteChrome(noteContent: HTMLElement): number {
-		const style = window.getComputedStyle(noteContent);
-		const px = (value: string) => {
-			const parsed = parseFloat(value);
-			return Number.isFinite(parsed) ? parsed : 0;
-		};
-		return (
-			px(style.marginTop) +
-			px(style.marginBottom) +
-			px(style.paddingTop) +
-			px(style.paddingBottom) +
-			px(style.borderTopWidth) +
-			px(style.borderBottomWidth)
-		);
-	}
-
-	/**
-	 * Gives a freshly opened segment row its planned natural height, clamped
-	 * to the space left on the page. The row is always fixed when the plan
-	 * covers this span: a flexible row would be filled to the remaining
-	 * page height and then shrunk when the next span opens, spilling
-	 * content that has nowhere to go. Spans the planner did not see
-	 * (nested or stale entries) leave the queue untouched and keep the row
-	 * flexible.
-	 *
-	 * @param {Node} node - The span element that opened the segment.
-	 * @param {HTMLElement[]} newColumns - The new segment's column boxes.
-	 * @returns {void}
-	 */
-	private applyPlannedSegmentHeight(
-		node: Node,
-		newColumns: HTMLElement[],
-	): void {
-		const entry = this.segmentHeightQueue.length
-			? this.segmentHeightQueue[0]
-			: undefined;
-		if (!entry || !newColumns.length) {
-			return;
-		}
-		const ref =
-			node instanceof HTMLElement && node.dataset
-				? node.dataset.ref
-				: undefined;
-		if (!ref || entry.ref !== ref) {
-			return;
-		}
-		this.segmentHeightQueue.shift();
-		const row = newColumns[0].parentElement;
-		if (!row || !row.classList.contains("paged_columns")) {
-			return;
-		}
-		const remaining = row.getBoundingClientRect().height;
-		const target = Math.min(entry.height ?? remaining, remaining);
-		if (target > COLUMN_EPSILON) {
-			this.fixSegmentRowHeight(row, target);
-		}
-	}
-
-	/**
-	 * Whether a span should be deferred to the next page because there is no
-	 * room for it below the current segment. Measured against the actual
-	 * remaining space in the flow host at walk time, so it stays correct even
-	 * when the planner's `available` estimate was off (e.g. a top float was
-	 * not yet placed when the page was planned). When deferred, the element is
-	 * treated as ordinary content and the overflow path moves it to the next
-	 * page, where it is encountered as a span again.
-	 *
-	 * @param {HTMLElement} wrapper - The page's flow host.
-	 * @param {Node} node - The span element.
-	 * @returns {boolean} True when the span should not be applied now.
-	 */
-	private shouldDeferColumnSpan(wrapper: HTMLElement, node: Node): boolean {
-		if (!(node instanceof HTMLElement)) {
-			return false;
-		}
-		const rows = wrapper.querySelectorAll(":scope > .paged_columns");
-		const lastRow = rows[rows.length - 1] as HTMLElement | undefined;
-		if (!lastRow) {
-			return false;
-		}
-		// A flexible last row fills the flow host but can shrink to make room
-		// for the span; only a row fixed at its planned natural height has a
-		// meaningful "remaining" space below it.
-		if (lastRow.dataset.pagedSegmentFixed !== "true") {
-			return false;
-		}
-		const remaining =
-			wrapper.getBoundingClientRect().bottom -
-			lastRow.getBoundingClientRect().bottom;
-		if (remaining <= COLUMN_EPSILON) {
-			// The flow host is already full: no room for this span.
-			return true;
-		}
-		const ctx = { maxLine: 0, maxMargin: 0 };
-		const spanHeight = this.estimateFlowBlockHeight(
-			node,
-			wrapper.getBoundingClientRect().width,
-			ctx,
-		);
-		const minRoom = (ctx.maxLine || 16) + 2 * COLUMN_EPSILON;
-		return remaining < spanHeight + minRoom;
-	}
-
-	/**
-	 * Releases a fixed height from the page's final segment row, so it
-	 * absorbs the leftover space below it. Only the last row may flex; rows
-	 * closed by a following span keep their measured height.
-	 *
-	 * @param {HTMLElement} wrapper - The page's flow host.
-	 * @returns {void}
-	 */
-	private relaxFinalSegmentRow(wrapper: HTMLElement): void {
-		const rows = wrapper.querySelectorAll(":scope > .paged_columns");
-		const last = rows[rows.length - 1] as HTMLElement | undefined;
-		if (last && last.dataset.pagedSegmentFixed) {
-			last.style.flex = "";
-			delete last.dataset.pagedSegmentFixed;
-		}
-	}
-
-
-	/**
-	 * Makes a column box the active layout root: bounds, fragmentainer
-	 * ancestor walks and overflow detection follow this element until the
-	 * next column (or page) takes over.
-	 *
-	 * @param {HTMLElement} dest - The column (or single-column wrapper).
-	 * @returns {void}
-	 */
-	setActiveColumn(dest: HTMLElement): void {
-		// Single-column pages keep the content area as the layout root
-		// (classic bounds); only manual column boxes swap the root.
-		if (dest.classList.contains("paged_column")) {
-			this.element = dest;
-		}
-		this.boundsDirty = true;
-		// Compute bounds immediately (the overflow phase relies on
-		// refreshBounds, but callers may read this.bounds directly).
-		if (dest.classList.contains("paged_column") && dest.closest(".paged_flow")) {
-			this.bounds = this.manualColumnBounds(dest);
-		} else {
-			this.bounds = this.refreshBounds();
-		}
-	}
-
-	/**
-	 * Bounds of a manual column: the column's own box, which the flex column
-	 * row already sizes to account for the top page float and any
-	 * `column-span: all` segments above it.
-	 *
-	 * Overflow detection reads against these bounds, so the physical column
-	 * boxes match the detection exactly. Using the flow host's full height
-	 * here would make columns inside a shorter `column-span` segment accept
-	 * the whole page height, letting their text overlap whatever follows.
-	 *
-	 * @param {HTMLElement} column - A `.paged_column` box inside a `.paged_flow`.
-	 * @returns {DOMRect} The bounds used for overflow detection.
-	 */
-	private manualColumnBounds(column: HTMLElement): DOMRect {
-		const elRect = column.getBoundingClientRect();
-		const availableHeight = Math.max(0, elRect.height);
-		return new DOMRect(
-			elRect.left,
-			elRect.top,
-			elRect.width,
-			availableHeight,
-		);
-	}
-
-	/**
-	 * Clears overflow bookkeeping attributes from a column and its content.
-	 *
-	 * Range tagging (which marks content already accounted for as overflow)
-	 * can cross a column boundary — `nodeAfter` climbs past a column's last
-	 * child and tags the next column as range-end overflow — suppressing all
-	 * further detection there. Every column starts its fill with a clean
-	 * slate, so these attributes are stripped when content is handed over.
-	 *
-	 * @param {HTMLElement} dest - The column (or single-column wrapper).
-	 * @returns {void}
-	 */
-	private clearOverflowTags(dest: HTMLElement): void {
-		dest.removeAttribute("data-overflow-tagged");
-		dest.removeAttribute("data-range-start-overflow");
-		dest.removeAttribute("data-range-end-overflow");
-		dest
-			.querySelectorAll(
-				"[data-overflow-tagged], [data-range-start-overflow], [data-range-end-overflow]",
-			)
-			.forEach((el) => {
-				el.removeAttribute("data-overflow-tagged");
-				el.removeAttribute("data-range-start-overflow");
-				el.removeAttribute("data-range-end-overflow");
-			});
-	}
-
-	/**
-	 * Advances layout to the next column, rebuilding the current overflow
-	 * into it and clearing stray overflow tags left by range tagging.
-	 *
-	 * @param {HTMLElement[]} columns - The page's column boxes.
-	 * @param {number} colIndex - Current column index.
-	 * @param {BreakToken} token - Overflow token to rebuild.
-	 * @param {HTMLElement|null} prevPage - Previous page content.
-	 * @returns {HTMLElement} The new active column.
-	 */
-	/**
-	 * The first side-relevant break value (left/right/recto/verso) carried by
-	 * a node's break-before or previous-break-after, if any. Plain page or
-	 * always breaks impose no side requirement.
-	 *
-	 * @param {Node|null|undefined} node - The node to inspect.
-	 * @returns {string|null} The side value, or null when there is none.
-	 */
-	private sideBreakValue(node: Node | null | undefined): string | null {
-		const el = node as HTMLElement | null;
-		if (!el || typeof el.dataset === "undefined") {
-			return null;
-		}
-		for (const v of [el.dataset.breakBefore, el.dataset.previousBreakAfter]) {
-			if (v === "left" || v === "right" || v === "recto" || v === "verso") {
-				return v;
-			}
-		}
-		return null;
-	}
-
-	private isForcedBreakToken(token: BreakToken): boolean {
-		if (token.getForcedBreakQueue().length) {
-			return true;
-		}
-		if (this.sideBreakValue(token.node)) {
-			return true;
-		}
-		// A plain page break on the token node also ends the page: advancing
-		// a column would continue the walk past the node and drop the break.
-		const el = token.node as HTMLElement | null;
-		if (!el || typeof el.dataset === "undefined") {
-			return false;
-		}
-		for (const v of [el.dataset.breakBefore, el.dataset.previousBreakAfter]) {
-			if (v === "page" || v === "always") {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	private advanceColumn(
-		columns: HTMLElement[],
-		colIndex: number,
-		token: BreakToken,
-		prevPage: HTMLElement | null,
-		source?: DocumentFragment | Node,
-	): HTMLElement {
-		const next = columns[colIndex + 1];
-		this.setActiveColumn(next);
-		this.addOverflowToPage(next, token, prevPage || undefined, source);
-		this.clearOverflowTags(next);
-		this.registerFragmentainers(next);
-		return next;
-	}
-
-	/**
-	 * True when a node carries a forced column break (break-before: column or
-	 * the propagated break-after: column from the previous sibling).
-	 */
-	private needsColumnBreak(node: Node): boolean {
-		const el = node as HTMLElement;
-		if (!el.dataset) {
-			return false;
-		}
-		return (
-			el.dataset.breakBefore === "column" ||
-			el.dataset.previousBreakAfter === "column"
-		);
-	}
-
-	/**
-	 * True when a manual column box already holds rendered content.
-	 * Empty text nodes and scaffolding are ignored.
-	 */
-	private columnHasContent(column: HTMLElement): boolean {
-		for (const child of Array.from(column.childNodes)) {
-			if (child.nodeType === Node.TEXT_NODE && child.textContent?.trim()) {
-				return true;
-			}
-			if (child.nodeType === Node.ELEMENT_NODE) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
-	 * Page content bounds, re-measured at most once per mutation batch.
-	 *
-	 * Appending a node only matters geometrically when something later
-	 * reads geometry; deferring the read here lets consecutive appends
-	 * share a single engine layout instead of forcing one per node.
-	 */
-	refreshBounds(): DOMRect {
-		if (this.boundsDirty) {
-			const elRect = this.element.getBoundingClientRect();
-			if (
-				this.element.classList.contains("paged_column") &&
-				this.element.closest(".paged_flow")
-			) {
-				// Manual columns are content-sized; overflow is detected
-				// against the flow host's vertical extent (the visible page
-				// region), while the horizontal extent is the column's own.
-				// The helper also keeps the physical column row's height in
-				// lockstep with these bounds.
-				this.bounds = this.manualColumnBounds(this.element);
-			} else {
-				this.bounds = elRect;
-			}
-			this.boundsDirty = false;
-		}
-		return this.bounds;
-	}
-
-	/**
-	 * True when the element computes to more than one column.
-	 */
-	isMulticolElement(el: Element): boolean {
-		return this.getFragmentainerMeta(el).count > 1;
-	}
-
-	/**
-	 * Reads and caches the column geometry of a potential fragmentainer.
-	 *
-	 * `column-gap: normal` resolves to 1em per spec; computed styles may
-	 * report the keyword, so it is approximated via font-size when needed.
-	 */
-	getFragmentainerMeta(el: Element): FragmentainerMeta {
-		let meta = this.fragmentainerMeta.get(el);
-		if (meta) {
-			return meta;
-		}
-		const style = window.getComputedStyle(el);
-		const count = parseInt(style.columnCount) || 1;
-		let gap = parseFloat(style.columnGap);
-		if (Number.isNaN(gap)) {
-			gap = parseFloat(style.fontSize) || 0;
-		}
-		const width = el.clientWidth || el.getBoundingClientRect().width;
-		meta = {
-			count,
-			gap,
-			columnWidth: count > 1 ? (width - (count - 1) * gap) / count : width,
-		};
-		this.fragmentainerMeta.set(el, meta);
-		return meta;
-	}
-
-	/**
-	 * The layout box of a fragmentainer.
-	 *
-	 * A fragmented multicol container's getBoundingClientRect() returns the
-	 * union across all fragments, which poisons geometry; the real box is
-	 * the first fragment positioned at (left, top) sized clientWidth x
-	 * clientHeight.
-	 */
-	fragmentainerBox(el: Element): {
-		left: number;
-		top: number;
-		right: number;
-		bottom: number;
-	} {
-		const first =
-			el instanceof HTMLElement ? el.getClientRects()[0] : undefined;
-		const fallback = el.getBoundingClientRect();
-		const left = first ? first.left : fallback.left;
-		const top = first ? first.top : fallback.top;
-		const width =
-			el instanceof HTMLElement && el.clientWidth
-				? el.clientWidth
-				: fallback.width;
-		const height =
-			el instanceof HTMLElement && el.clientHeight
-				? el.clientHeight
-				: fallback.height;
-		return {
-			left,
-			top,
-			right: left + width,
-			bottom: top + height,
-		};
-	}
-
-	/**
-	 * Finds multicol roots among the rendered descendants of `root`
-	 * (including itself) and registers them. Nested fragmentainers are not
-	 * supported: the inner container degrades to a single column with a
-	 * warning.
-	 */
-	registerFragmentainers(root: HTMLElement | Node): void {
-		if (root instanceof HTMLElement && this.isMulticolElement(root)) {
-			this.registerFragmentainer(root);
-		}
-		if (this.multicolSelectors.size === 0) {
-			return;
-		}
-		for (const selector of this.multicolSelectors) {
-			let matches: NodeListOf<Element> | undefined;
-			try {
-				matches = (root as HTMLElement).querySelectorAll(selector);
-			} catch {
-				continue;
-			}
-			if (!matches) {
-				continue;
-			}
-			for (const el of Array.from(matches)) {
-				if (!this.isMulticolElement(el)) {
-					continue;
-				}
-				this.registerFragmentainer(el);
-			}
-		}
-	}
-
-	/**
-	 * Registers a single fragmentainer unless it sits inside an already
-	 * registered one (nested multicol), which is degraded gracefully.
-	 */
-	private registerFragmentainer(el: Element): void {
-		if (this.fragmentainers.has(el)) {
-			return;
-		}
-		let ancestor = el.parentElement;
-		while (
-			ancestor &&
-			!ancestor.classList.contains("paged_page_content") &&
-			!ancestor.classList.contains("paged_footnote_inner_content")
-		) {
-			if (this.fragmentainers.has(ancestor)) {
-				console.warn(
-					"paged-with-floats: nested multi-column containers are not supported; " +
-						"rendering the inner container as a single column.",
-				);
-				(el as HTMLElement).style.columnCount = "1";
-				this.fragmentainerMeta.set(el, {
-					count: 1,
-					gap: 0,
-					columnWidth: el.getBoundingClientRect().width,
-				});
-				return;
-			}
-			ancestor = ancestor.parentElement;
-		}
-		this.fragmentainers.add(el);
-	}
-
-	/**
-	 * The nearest registered fragmentainer ancestor of a node, or null when
-	 * the node flows directly within the page wrapper (single-column
-	 * semantics relative to the page bounds).
-	 */
-	getFragmentainer(node: Node): Element | null {
-		let el: Element | null =
-			node instanceof Element ? node : node.parentElement;
-
-		while (
-			el &&
-			el !== this.element &&
-			!el.classList.contains("paged_page_content") &&
-			!el.classList.contains("paged_footnote_inner_content")
-		) {
-			if (this.fragmentainers.has(el)) {
-				return el;
-			}
-			el = el.parentElement;
-		}
-
-		return null;
-	}
-
-	/**
-	 * Whether a single client rect of a node exceeds its fragmentainer.
-	 *
-	 * Without a fragmentainer this falls back to the classic page-bounds
-	 * comparison. Within a fragmentainer:
-	 * - a rect starting at or beyond the right edge lies in the hidden
-	 *   spill-over column and overflows;
-	 * - a rect starting in the last visible column must also fit vertically.
-	 */
-	rectOverflows(
-		rect: DOMRect,
-		additions: number,
-		frag: Element | null,
-		bounds: DOMRect = this.bounds,
-	): boolean {
-		if (!frag) {
-			return (
-				rect.right > bounds.right + COLUMN_EPSILON ||
-				rect.bottom > bounds.bottom + additions + COLUMN_EPSILON
+		const style = getComputedStyle(noteContent);
+		let chrome = 0;
+		for (const prop of [
+			"marginTop",
+			"marginBottom",
+			"paddingTop",
+			"paddingBottom",
+			"borderTopWidth",
+			"borderBottomWidth",
+		]) {
+			const value = parseFloat(
+				String(style[prop as keyof CSSStyleDeclaration]),
 			);
+			chrome += Number.isNaN(value) ? 0 : value;
 		}
-
-		const meta = this.getFragmentainerMeta(frag);
-		const b = this.fragmentainerBox(frag);
-
-		if (rect.left >= b.right + meta.gap - COLUMN_EPSILON) {
-			// Started inside the hidden spill-over column.
-			return true;
-		}
-
-		if (meta.count > 1) {
-			const rel = rect.left - b.left;
-			const stride = meta.columnWidth + meta.gap;
-			const colIndex = Math.floor((rel + COLUMN_EPSILON) / stride);
-			if (colIndex >= meta.count - 1) {
-				// Last visible column: vertical space is the constraint.
-				return (
-					rect.bottom > b.bottom + additions + COLUMN_EPSILON &&
-					rect.left < b.right + COLUMN_EPSILON
-				);
-			}
-		} else if (rect.bottom > b.bottom + additions + COLUMN_EPSILON) {
-			return true;
-		}
-
-		return false;
+		return chrome;
 	}
 
 	/**
-	 * Constrains a multicol block to the remaining vertical space on this
-	 * page so the browser fragments it internally instead of balancing it
-	 * past the bottom edge. Only applied when the block's natural height
-	 * does not fit.
-	 */
-	constrainMulticolHeight(el: Element, bounds: DOMRect = this.bounds): void {
-		const box = this.fragmentainerBox(el);
-		const bottom = box.bottom;
-		if (bottom - box.top === 0 || bottom <= bounds.bottom + COLUMN_EPSILON) {
-			return;
-		}
-		const htmlEl = el as HTMLElement;
-		const available = Math.floor(bounds.bottom - box.top);
-		if (available <= 0) {
-			return;
-		}
-		htmlEl.style.columnFill = "auto";
-		htmlEl.style.height = `${available}px`;
-		htmlEl.dataset.pagedFragmentainerConstrained = "true";
-		// Geometry changed; refresh cached metadata for this element.
-		this.fragmentainerMeta.delete(el);
-		this.invalidateBounds();
-	}
-
-	/**
-	 * Fills the page and check for the first overflow.
-	 *
-	 * @param {Element} wrapper - current Page's content wrapper
-	 * @param {HTML} source - Html source template content
-	 * @param {BreakToken} breakToken - previous breakToken
-	 * @param {Page} prevPage - previous Page
-	 * @param {DOMRect} bounds - Page bounds
-	 * @returns {BreakToken}
+	 * Fills the page (or column) with content from the still-unrendered
+	 * source fragment, starting at the incoming break token. Reacts to
+	 * overflow by advancing through manual columns and, when the page is
+	 * full, hands back a BreakToken describing where the next page resumes.
 	 */
 	async renderTo(
 		wrapper: HTMLElement,
@@ -2998,59 +5044,33 @@ class Layout {
 		prevPage: HTMLElement | null = null,
 		bounds: DOMRect = this.bounds,
 	): Promise<RenderResult> {
-		let start = this.getStart(source, breakToken);
-		let firstDivisible = source as HTMLElement;
-
-		while (firstDivisible.children.length == 1) {
-			firstDivisible = firstDivisible.children[0] as HTMLElement;
+		const start = this.getStart(source, breakToken);
+		let firstDivisible: Node | null | undefined = start;
+		while (
+			firstDivisible &&
+			isElement(firstDivisible) &&
+			(firstDivisible as Element).childNodes.length === 1
+		) {
+			firstDivisible = (firstDivisible as Element).firstChild;
 		}
-
-		let walker = walk(start!, source);
-
+		let walker = walk(start as Node, source);
 		let node: Node | undefined;
-		let done;
-		let next;
-		let forcedBreakQueue: Node[] = [];
-
-		let prevBreakToken = breakToken || new BreakToken(start!);
-
-		// Manual columns: the flow host holds N column boxes that are
-		// filled sequentially as single-column fragmentainers. `dest` is
-		// the column currently receiving content (the host itself for
-		// single-column pages). `columns` may be swapped for a fresh
-		// segment when a `column-span: all` element is encountered.
+		let done = false;
+		let next: IteratorResult<Node, void>;
+		const forcedBreakQueue: Node[] = [];
+		const prevBreakToken = breakToken || new BreakToken(start as Node);
 		let columns = this.flowColumns(wrapper);
 		let colIndex = 0;
 		let dest = columns[0];
 		this.setActiveColumn(dest);
-
-		this.hooks &&
-			this.hooks.onPageLayout.trigger(wrapper, prevBreakToken, this);
-
-		// Add overflow, and check that it doesn't have overflow itself.
-		this.addOverflowToPage(
-			dest,
-			breakToken,
-			prevPage as HTMLElement | undefined,
-			source,
-		);
-
-		// Reserve space for the footnotes this page will extract before any
-		// further content is laid out, so a late footnote-area growth cannot
-		// shrink already-filled columns and spill their text.
+		this.hooks.onPageLayout.trigger(wrapper, prevBreakToken, this);
+		this.addOverflowToPage(dest, breakToken, prevPage || undefined, source);
 		this.reserveFootnoteAreaHeight(wrapper, source, start);
-
-		// Footnotes may change the bounds.
 		bounds = this.refreshBounds();
-
-		// Register fragmentainers (mid-flow multicol blocks inside the
-		// column; the manual column boxes themselves are plain single
-		// column fragmentainers and need no registration).
 		this.registerFragmentainers(dest);
 		for (const frag of Array.from(this.fragmentainers)) {
 			this.constrainMulticolHeight(frag, bounds);
 		}
-
 		let newBreakToken = this.findBreakToken(
 			dest,
 			source,
@@ -3058,78 +5078,55 @@ class Layout {
 			prevBreakToken,
 			start,
 		);
-
 		if (prevBreakToken.isFinished()) {
 			if (newBreakToken) {
 				newBreakToken.setFinished();
 			}
 			return new RenderResult(newBreakToken);
 		}
-
-		// Overflow rebuilt from the previous page can be taller than the
-		// first column; hand it to the next column on this page before
-		// walking further content.
 		if (
 			newBreakToken &&
 			!newBreakToken.isFinished() &&
 			colIndex < columns.length - 1 &&
-			// A token carrying a forced break must end the page: the queued
-			// node was already yielded by the walker, and advancing a column
-			// would continue the walk past it, skipping the break entirely.
 			!this.isForcedBreakToken(newBreakToken)
 		) {
-			dest = this.advanceColumn(
-				columns,
-				colIndex,
-				newBreakToken,
-				prevPage as HTMLElement | null,
-				source,
-			);
+			dest = this.advanceColumn(columns, colIndex, newBreakToken, prevPage, source);
 			colIndex++;
 			bounds = this.refreshBounds();
 			newBreakToken = undefined;
 		}
-
-		// Plan natural heights for any `column-span` segments ahead on this
-		// page: fixes the first row at the height its content needs and
-		// queues heights for rows opened by later spans, so short segments
-		// stop receiving an equal flex share of the page.
 		this.planSegmentHeights(wrapper, source, start);
-
-		let hasRenderedContent = Array.from(wrapper.childNodes).some((child) => {
-			if (child.nodeType === Node.TEXT_NODE) {
-				return !!child.textContent?.trim();
+		let hasRenderedContent = false;
+		for (const childNode of Array.from(wrapper.childNodes)) {
+			if (isText(childNode)) {
+				if ((childNode.textContent || "").trim().length) {
+					hasRenderedContent = true;
+				}
+			} else if (!(childNode instanceof HTMLElement)) {
+				hasRenderedContent = true;
+			} else {
+				const el = childNode;
+				if (
+					!el.dataset?.undisplayed &&
+					!el.classList.contains("paged_float_top") &&
+					!el.classList.contains("paged_float_bottom") &&
+					!el.classList.contains("paged_float_spacer") &&
+					!el.classList.contains("paged_columns")
+				) {
+					hasRenderedContent = true;
+				}
 			}
-			if (!(child instanceof HTMLElement)) {
-				return true;
-			}
-			if (child.dataset.undisplayed) {
-				return false;
-			}
-			return (
-				!child.classList.contains("paged_float_top") &&
-				!child.classList.contains("paged_float_bottom") &&
-				!child.classList.contains("paged_float_spacer") &&
-				!child.classList.contains("paged_columns")
-			);
-		});
-
-		if (prevBreakToken) {
-			// The forced-break queue does NOT carry across pages: queued nodes
-			// always sit after the token node / overflow start in source order,
-			// so this page's walk re-encounters them and re-queues them if the
-			// break is still pending. Carrying the queue would re-fire the
-			// break at the top of the page — before the rebuilt overflow
-			// content has rendered — stranding it on a blank page.
-			forcedBreakQueue = [];
 		}
-
-		let mainLoopGuard = 0;
+		if (prevBreakToken) {
+			forcedBreakQueue.length = 0;
+		}
+		let iterations = 0;
 		while (!done && !newBreakToken) {
-			if (++mainLoopGuard > 10000) {
+			iterations++;
+			if (iterations > 10000) {
 				console.error(
 					"paged-with-floats: layout main loop guard exceeded; bailing out. node=",
-					node?.nodeName,
+					node ? node.nodeName : node,
 					"done=",
 					done,
 					"newBreakToken=",
@@ -3138,35 +5135,21 @@ class Layout {
 				this.failed = true;
 				return new RenderResult(
 					undefined,
-					("Layout main loop guard exceeded") as unknown as Error,
+					"Layout main loop guard exceeded" as unknown as Error,
 				);
 			}
 			next = walker.next();
-			node = next.value;
-			done = next.done;
-
+			node = next.value as Node | undefined;
+			done = next.done as boolean;
 			if (node) {
-				this.hooks && this.hooks.layoutNode.trigger(node);
-
-				// Check if the rendered element has a break set
-				// Remember the node but don't apply the break until we have laid
-				// out the rest of any parent content - this lets a table or divs
-				// side by side still add content to this page before we start a new
-				// one. The break is only skipped when this node itself starts the
-				// page (the break was honored by the page break that produced this
-				// token) or the page is still empty and either the break carries
-				// no side requirement (a plain page break at an empty page is a
-				// no-op) or the current page's side already satisfies it (a
-				// left break on a left page renders right here). A side break on
-				// an empty page with a mismatching side must still fire — e.g. a
-				// recto chapter heading reached on a fresh verso page.
+				this.hooks.layoutNode.trigger(node);
 				if (this.shouldBreak(node)) {
 					const side = this.sideBreakValue(node);
 					let doBreak = hasRenderedContent;
-					if (!doBreak && side && node !== start && start !== undefined) {
-						const pageEl = this.element.closest(
-							".paged_page",
-						) as HTMLElement | null;
+					const pageEl = this.element.closest(".paged_page") as
+						| HTMLElement
+						| null;
+					if (!hasRenderedContent && side && node !== start) {
 						doBreak = !(
 							pageEl &&
 							pageEl.classList.contains("paged_" + side + "_page")
@@ -3174,181 +5157,117 @@ class Layout {
 					}
 					if (doBreak) {
 						forcedBreakQueue.push(node);
-						// The page now ends a part: a forced page break follows.
-						// Marked for the post-flow column balancer, which
-						// balances the final row of every part-ending page (not
-						// just the document's last page).
-						const pageEl = this.element.closest(
-							".paged_page",
-						) as HTMLElement | null;
 						if (pageEl) {
 							pageEl.dataset.pagedPartEnd = "true";
 						}
 					}
 				}
-
-				if (
-					!forcedBreakQueue.length &&
-					(node as HTMLElement).dataset &&
-					(node as HTMLElement).dataset.page
-				) {
-					let named = (node as HTMLElement).dataset.page!;
-					let page = this.element.closest(".paged_page")!;
-					page.classList.add("pagejs_named_page");
-					page.classList.add("paged_" + named + "_page");
-					if (!(node as HTMLElement).dataset.splitFrom) {
-						page.classList.add("paged_" + named + "_first_page");
-					}
-				}
-			}
-
-			// A `column-span: all` element takes a full-width row between
-			// column segments; the flow after it continues in a fresh set of
-			// columns (column 0 again). If the current column is full, its
-			// overflow can still be absorbed by the remaining columns of this
-			// segment (migrateShrunkenSegmentOverflow runs when the span
-			// opens) — only defer the span when the segment's last column is
-			// full, in which case the overflow must go to the next page.
-			// A span with a pending forced break (e.g. break-before: recto,
-			// queued above) is not absorbed here: the queued break goes to the
-			// check phase below, the page breaks first, and the span renders
-			// at the top of the next page — whose side the chunker fixes up.
-			if (
-				this.isColumnSpan(node) &&
-				columns.length > 1 &&
-				!forcedBreakQueue.includes(node!)
-			) {
-				const hasOverflow = this.hasOverflow(
-					dest,
-					this.refreshBounds(),
-				);
-				let defer = this.shouldDeferColumnSpan(wrapper, node!);
-				if (!defer) {
-					// A span whose following block must stay adjacent
-					// (break-after: avoid on the span, or the next node marked
-					// to follow it) must not be absorbed at the very bottom of
-					// the page: with no room left for the next block it would
-					// sit alone above an empty segment row, splitting the
-					// avoid-pair across the page break.
-					const spanEl = node as HTMLElement;
-					// The following block: skip inter-element whitespace so the
-					// avoid check and the initial-letter detection see it.
-					let nextNode = nodeAfter(
-						node!,
-						source,
-						false,
-						false,
-					) as HTMLElement | null;
-					while (
-						nextNode &&
-						nextNode.nodeType === Node.TEXT_NODE &&
-						!nextNode.textContent?.trim()
-					) {
-						nextNode = nodeAfter(
-							nextNode,
-							source,
-							false,
-							false,
-						) as HTMLElement | null;
-					}
-					const avoidAfter =
-						spanEl.dataset.breakAfter === "avoid" ||
-						!!(
-							nextNode &&
-							nextNode.dataset &&
-							nextNode.dataset.previousBreakAfter === "avoid"
-						);
-					if (avoidAfter) {
-						const lastRow = wrapper.querySelector(
-							":scope > .paged_columns:last-of-type",
-						) as HTMLElement | null;
-						if (lastRow) {
-							const cols = Array.from(
-								lastRow.querySelectorAll<HTMLElement>(
-									":scope > .paged_column",
-								),
-							);
-							const contentHeight = cols.length
-								? Math.max(...cols.map((c) => c.scrollHeight))
-								: 0;
-							const remaining =
-								wrapper.getBoundingClientRect().bottom -
-								(lastRow.getBoundingClientRect().top + contentHeight);
-							const ctx = { maxLine: 0, maxMargin: 0 };
-							const spanHeight = this.estimateFlowBlockHeight(
-								spanEl,
-								wrapper.getBoundingClientRect().width,
-								ctx,
-							);
-							const line = ctx.maxLine || 16;
-							// The following block may open with an initial-letter
-							// float (drop cap) taller than a text line: its first
-							// line box spans the float's height, so the room
-							// needed below the span is larger than one line.
-							let need = line;
-							const floatSpan = nextNode?.querySelector?.(
-								".paged_initial_letter",
-							) as HTMLElement | null;
-							if (floatSpan && nextNode) {
-								const lines = parseFloat(
-									floatSpan.dataset.pagedInitialLetterLines || "0",
-								);
-								if (lines > 0) {
-									const nextCtx = { maxLine: 0, maxMargin: 0 };
-									this.estimateFlowBlockHeight(
-										nextNode,
-										wrapper.getBoundingClientRect().width,
-										nextCtx,
-									);
-									need = Math.max(
-										need,
-										lines * (nextCtx.maxLine || line),
-									);
-								}
-							}
-							if (remaining < spanHeight + need + 2 * COLUMN_EPSILON) {
-								defer = true;
+				if (!forcedBreakQueue.length) {
+					const named = (node as HTMLElement).dataset?.page;
+					if (named) {
+						const pageEl = this.element.closest(".paged_page") as
+							| HTMLElement
+							| null;
+						if (pageEl) {
+							pageEl.classList.add("pagejs_named_page");
+							pageEl.classList.add("paged_" + named + "_page");
+							if (!(node as HTMLElement).dataset?.splitFrom) {
+								pageEl.classList.add("paged_" + named + "_first_page");
 							}
 						}
 					}
 				}
-				const canAbsorb =
-					(!hasOverflow || colIndex < columns.length - 1) && !defer;
+			}
+			if (
+				node &&
+				columns.length > 1 &&
+				this.isColumnSpan(node) &&
+				!forcedBreakQueue.includes(node)
+			) {
+				const hasOvf = this.hasOverflow(dest, this.refreshBounds());
+				let defer = this.shouldDeferColumnSpan(wrapper, node);
+				if (!defer) {
+					const spanEl = node as HTMLElement;
+					const nextNode = nodeAfter(node, source, false, false);
+					const avoidAfter =
+						spanEl.dataset?.breakAfter === "avoid" ||
+						((nextNode as HTMLElement | undefined)?.dataset
+							?.previousBreakAfter === "avoid");
+					if (avoidAfter) {
+						const lastRow = wrapper.querySelector(
+							":scope > .paged_columns:last-of-type",
+						) as HTMLElement | null;
+						let contentHeight = 0;
+						if (lastRow) {
+							for (const column of lastRow.querySelectorAll(
+								":scope > .paged_column",
+							)) {
+								contentHeight = Math.max(
+									contentHeight,
+									(column as HTMLElement).scrollHeight,
+								);
+							}
+						}
+						const wrapperRect = wrapper.getBoundingClientRect();
+						const remaining = lastRow
+							? wrapperRect.bottom -
+								(lastRow.getBoundingClientRect().top + contentHeight)
+							: 0;
+						const spanCtx = { maxLine: 0, maxMargin: 0 };
+						const spanHeight = this.estimateFlowBlockHeight(
+							spanEl,
+							wrapperRect.width,
+							spanCtx,
+						);
+						const line = spanCtx.maxLine || 16;
+						let need = line;
+						const initialLetter = nextNode
+							? (nextNode as HTMLElement).querySelector?.(
+									".paged_initial_letter",
+								)
+							: null;
+						if (initialLetter) {
+							const initialLetterLines = parseInt(
+								(initialLetter as HTMLElement).dataset
+									.pagedInitialLetterLines || "",
+							);
+							if (initialLetterLines > 0) {
+								const nextCtx = { maxLine: 0, maxMargin: 0 };
+								this.estimateFlowBlockHeight(
+									nextNode as Element,
+									wrapperRect.width,
+									nextCtx,
+								);
+								need = initialLetterLines * (nextCtx.maxLine || line);
+							}
+						}
+						if (remaining < spanHeight + need + 2 * COLUMN_EPSILON) {
+							defer = true;
+						}
+					}
+				}
+				const canAbsorb = (!hasOvf || colIndex < columns.length - 1) && !defer;
 				if (canAbsorb) {
-					columns = this.applyColumnSpan(
-						wrapper,
-						node!,
-						source,
-						breakToken,
-					);
+					columns = this.applyColumnSpan(wrapper, node, source, breakToken);
 					colIndex = 0;
 					dest = columns[0];
 					this.setActiveColumn(dest);
 					bounds = this.refreshBounds();
 					hasRenderedContent = true;
-					walker = walk(nodeAfter(node!, source, false, false) as Node, source);
+					walker = walk(
+						nodeAfter(node, source, false, false) as Node,
+						source,
+					);
 					continue;
 				}
 				if (defer) {
-					// No room for this span on the page: break here so the span
-					// and all following content render on the next page, where
-					// it is laid out as a span with the full column width. The
-					// page now ends a part — marked for the post-flow column
-					// balancer, which spreads the remaining content across the
-					// columns instead of leaving later ones empty.
-					const pageEl = this.element.closest(
-						".paged_page",
-					) as HTMLElement | null;
+					const pageEl = this.element.closest(".paged_page") as
+						| HTMLElement
+						| null;
 					if (pageEl) {
 						pageEl.dataset.pagedPartEnd = "true";
 					}
-					newBreakToken = this.breakAt(node!, 0);
-					// Relax the final segment row's planned height BEFORE the
-					// sweep: with the span deferred, the planned height (which
-					// assumed the span would open another segment on this page)
-					// is stale. The flex row re-fits the remaining page space,
-					// columns shrink, and the sweep must measure the final
-					// boxes or it leaves content spilling below them.
+					newBreakToken = this.breakAt(node, 0);
 					this.relaxFinalSegmentRow(wrapper);
 					this.sweepResidualColumnOverflow(
 						wrapper,
@@ -3359,11 +5278,6 @@ class Layout {
 					return new RenderResult(newBreakToken);
 				}
 			}
-
-			// Handle break-before/after: column inside a manual-column page.
-			// The break is applied before appending the affected node, moving it
-			// (and its rebuilt ancestor chain) to the next column. When already
-			// in the last column, the break is promoted to a page break.
 			if (
 				node &&
 				columns.length > 1 &&
@@ -3375,91 +5289,74 @@ class Layout {
 						columns,
 						colIndex,
 						new BreakToken(node),
-						prevPage as HTMLElement | null,
+						prevPage,
 						source,
 					);
 					colIndex++;
 					bounds = this.refreshBounds();
 				} else {
-					// Promote the column break to a page break.
 					forcedBreakQueue.push(node);
 				}
 			}
-
-			// Check whether we have overflow when we've completed laying out a top
-			// level element. This lets it have multiple children overflowing and
-			// allows us to move all of the overflows onto the next page together.
-			if (forcedBreakQueue.length || !node || !node.parentElement) {
-				this.hooks && this.hooks.layout.trigger(wrapper, this);
-
-				let imgs = wrapper.querySelectorAll("img");
+			if (
+				forcedBreakQueue.length ||
+				!node ||
+				!node.parentElement ||
+				isElement(node)
+			) {
+				this.hooks.layout.trigger(wrapper, this);
+				const imgs = wrapper.querySelectorAll("img");
 				if (imgs.length) {
 					await this.waitForImages(imgs);
 				}
-
-				// Single lazy re-measurement for this whole check phase.
 				bounds = this.refreshBounds();
-
 				newBreakToken = this.findBreakToken(
 					dest,
 					source,
 					bounds,
 					prevBreakToken,
-					node,
+					node !== undefined ? node : null,
 				);
-
 				if (
 					newBreakToken &&
 					node === undefined &&
 					colIndex >= columns.length - 1
 				) {
-					// We have run out of content. Do add the overflow to a new
-					// page but don't repeat the whole thing again. Only finish
-					// when there is no further column on this page to fill —
-					// otherwise the remaining columns are skipped and the
-					// overflow jumps to the next page.
 					newBreakToken.setFinished();
 				}
-
 				if (forcedBreakQueue.length) {
 					if (newBreakToken) {
 						newBreakToken.setForcedBreakQueue(forcedBreakQueue);
 					} else {
 						newBreakToken = this.breakAt(
-							forcedBreakQueue.shift(),
+							forcedBreakQueue.shift() as Node,
 							0,
 							forcedBreakQueue,
 						);
 					}
 				}
-
 				if (newBreakToken && newBreakToken.equals(prevBreakToken)) {
 					this.failed = true;
 					console.warn(
-						"paged-with-floats: unable to layout item, stopping render: " + node,
+						"paged-with-floats: unable to layout item, stopping render: " +
+							node,
 					);
 					return new RenderResult(
 						undefined,
 						("Unable to layout item: " + node) as unknown as Error,
 					);
 				}
-
-				// The current column is full: hand the overflow to the next
-				// column on this page instead of breaking to a new page.
 				if (
 					newBreakToken &&
 					!newBreakToken.isFinished() &&
 					colIndex < columns.length - 1 &&
-					// Forced-break tokens end the page (see the entry handoff
-					// above): the queued node was already yielded and must not
-					// be walked past.
 					!this.isForcedBreakToken(newBreakToken)
 				) {
 					dest = this.advanceColumn(
 						columns,
 						colIndex,
 						newBreakToken,
-						prevPage as HTMLElement | null,
+						prevPage,
 						source,
 					);
 					colIndex++;
@@ -3467,35 +5364,27 @@ class Layout {
 					newBreakToken = undefined;
 					continue;
 				}
-
-			if (!node || newBreakToken) {
-				this.relaxFinalSegmentRow(wrapper);
-				if (newBreakToken) {
-					this.sweepResidualColumnOverflow(
-						wrapper,
-						source,
-						newBreakToken,
-						prevBreakToken,
-					);
+				if (!node || newBreakToken) {
+					this.relaxFinalSegmentRow(wrapper);
+					if (newBreakToken) {
+						this.sweepResidualColumnOverflow(
+							wrapper,
+							source,
+							newBreakToken,
+							prevBreakToken,
+						);
+					}
+					return new RenderResult(newBreakToken);
 				}
-				return new RenderResult(newBreakToken);
 			}
-			}
-
-			// Should the Node be a shallow or deep clone?
-			let shallow = isContainer(node!);
-
+			const shallow = isContainer(node as Node);
 			const appendedClone = this.append(
-				node!,
+				node as Node,
 				dest,
 				source,
 				breakToken,
 				shallow,
 			);
-
-			// A top-level multicol block (e.g. styled inline, so no tracked
-			// selector matches) becomes a fragmentainer. Constrain its height
-			// to the remaining space when its natural height does not fit.
 			if (
 				appendedClone instanceof HTMLElement &&
 				this.isMulticolElement(appendedClone)
@@ -3503,14 +5392,7 @@ class Layout {
 				this.registerFragmentainer(appendedClone);
 				this.constrainMulticolHeight(appendedClone, this.refreshBounds());
 			} else {
-				// Content appended *inside* an existing fragmentainer (e.g.
-				// while filling a continued multicol block) changes how much
-				// of the remaining column space is used; keep the
-				// fragmentainer's height constraint current.
-				const parentFrag =
-					appendedClone instanceof Node
-						? this.getFragmentainer(appendedClone)
-						: null;
+				const parentFrag = this.getFragmentainer(appendedClone);
 				if (
 					parentFrag &&
 					parentFrag !== appendedClone &&
@@ -3519,32 +5401,22 @@ class Layout {
 					this.constrainMulticolHeight(parentFrag, this.refreshBounds());
 				}
 			}
-
-			// The append mutated the DOM; geometry consumers later in this
-			// iteration re-measure once, lazily.
 			this.invalidateBounds();
-
-			// Check whether layout has content yet. Undisplayed nodes (e.g.
-			// running headers parked in the flow) render nothing and must not
-			// let forced breaks fire before real content exists.
-			if (!hasRenderedContent) {
-				hasRenderedContent =
-					hasContent(node!) && !(node as HTMLElement).dataset?.undisplayed;
-			}
-
-			// Skip to the next node if a deep clone was rendered.
+			hasRenderedContent =
+				hasRenderedContent ||
+				(hasContent(node as Node) &&
+					!((node as HTMLElement).dataset?.undisplayed));
 			if (!shallow) {
-				walker = walk(nodeAfter(node!, source, false, false) as Node, source);
+				walker = walk(
+					nodeAfter(node as Node, source, false, false) as Node,
+					source,
+				);
 			}
 		}
-
-		// The walker may have exhausted right after handing content to a
-		// new column, in which case the loop exits before that column's
-		// overflow is checked. Run one final check, cascading into any
-		// further columns.
 		if (done && !newBreakToken) {
 			let cascades = 0;
-			for (;;) {
+			while (cascades < columns.length) {
+				cascades++;
 				bounds = this.refreshBounds();
 				newBreakToken = this.findBreakToken(
 					dest,
@@ -3570,25 +5442,17 @@ class Layout {
 						columns,
 						colIndex,
 						newBreakToken,
-						prevPage as HTMLElement | null,
+						prevPage,
 						source,
 					);
 					colIndex++;
 					newBreakToken = undefined;
-					if (++cascades >= columns.length) {
-						break;
-					}
 					continue;
 				}
 				break;
 			}
 		}
-
-		this.hooks &&
-			this.hooks.beforeRenderResult.trigger(newBreakToken, wrapper, this);
-		// Relax the final segment row's planned height before the sweep so
-		// the sweep measures the page's final column boxes (see the defer
-		// path above for why the order matters).
+		this.hooks.beforeRenderResult.trigger(newBreakToken, wrapper, this);
 		this.relaxFinalSegmentRow(wrapper);
 		if (newBreakToken) {
 			this.sweepResidualColumnOverflow(
@@ -3601,3180 +5465,54 @@ class Layout {
 		return new RenderResult(newBreakToken);
 	}
 
-	breakAt(
-		node: Node | undefined,
-		offset = 0,
-		forcedBreakQueue: Node[] = [],
-	): BreakToken {
-		let newBreakToken = new (BreakToken as any)(
-			node,
-			offset,
-		) as BreakToken;
-		// BreakToken's constructor only accepts (node, overflowArray); the
-		// forced-break queue has to be attached explicitly or forced page
-		// breaks (e.g. a deferred column-span with break-before) are lost.
-		if (forcedBreakQueue.length) {
-			newBreakToken.setForcedBreakQueue(forcedBreakQueue.slice());
-		}
-		let breakHooks = this.hooks.onBreakToken.triggerSync(
-			newBreakToken,
-			undefined,
-			node as HTMLElement | undefined,
-			this,
-		);
-		breakHooks.forEach((newToken) => {
-			if (typeof newToken != "undefined") {
-				newBreakToken = newToken as BreakToken;
-			}
-		});
-
-		return newBreakToken;
-	}
-
-	shouldBreak(node: Node, limiter?: Node): boolean {
-		let previousNode = nodeBefore(node, limiter);
-		let parentNode = node.parentNode;
-		let parentBreakBefore =
-			needsBreakBefore(node) &&
-			parentNode &&
-			!previousNode &&
-			needsBreakBefore(parentNode as unknown as Node);
-		let doubleBreakBefore;
-
-		if (parentBreakBefore) {
-			doubleBreakBefore =
-				(node as Element).dataset.breakBefore ===
-				(parentNode as Element).dataset.breakBefore;
-		}
-
-		return (
-			(!doubleBreakBefore && needsBreakBefore(node)) ||
-			needsPreviousBreakAfter(node) ||
-			needsPageBreak(node, previousNode as Node)
-		);
-	}
-
-	forceBreak(): void {
-		this.forceRenderBreak = true;
-	}
-
-	getStart(
-		source: DocumentFragment | Node,
-		breakToken?: BreakToken,
-	): Node | undefined {
-		let start;
-		let node = breakToken && breakToken.node;
-		let finished = breakToken && breakToken.finished;
-
-		if (node) {
-			start = node;
-		} else {
-			start = source.firstChild;
-		}
-
-		return finished ? undefined : start!;
-	}
-
 	/**
-	 * Merge items from source into dest which don't yet exist in dest.
-	 *
-	 * @param {element} dest
-	 *   A destination DOM node tree.
-	 * @param {element} source
-	 *   A source DOM node tree.
-	 *
-	 * @returns {void}
+	 * Awaits every image's load concurrently; an image that can never
+	 * settle would hang the walk, so callers pass only settleable images.
 	 */
-	/**
-	 * Re-orders children of containers inside a rebuilt overflow fragment so
-	 * they follow source document order. Residual sweeps can push overflow
-	 * entries out of order (a fragment's split skeleton is created before
-	 * later siblings are merged), which would otherwise render list items or
-	 * sibling blocks out of sequence. Only groups of element children that
-	 * all carry a data-ref mapping into the source are touched.
-	 *
-	 * @param {DocumentFragment} fragment - The rebuilt overflow fragment.
-	 * @param {DocumentFragment|Node|undefined} source - The source content.
-	 */
-	private reorderBySourceOrder(
-		fragment: DocumentFragment,
-		source?: DocumentFragment | Node,
-	): void {
-		if (!source) {
-			return;
-		}
-		const compare = (a: number[], b: number[]): number => {
-			const len = Math.min(a.length, b.length);
-			for (let i = 0; i < len; i++) {
-				if (a[i] !== b[i]) {
-					return a[i] - b[i];
-				}
-			}
-			return a.length - b.length;
-		};
-		const containers = [
-			fragment,
-			...Array.from(fragment.querySelectorAll("*")),
-		].filter((c) => !(c as Element).closest?.("table"));
-		for (const container of containers) {
-			const children = Array.from(container.children);
-			if (children.length < 2) {
-				continue;
-			}
-			// Only reorder when every element child is a ref-mapped clone AND
-			// the container holds no significant text: re-appending elements
-			// to sort them moves them after any text siblings, which would
-			// scramble mixed inline content (e.g. emphasized words inside a
-			// split paragraph). Pure element sequences — list items, sibling
-			// blocks — are the safe domain.
-			const hasText = Array.from(container.childNodes).some(
-				(n) => n.nodeType === Node.TEXT_NODE && n.textContent?.trim(),
-			);
-			if (hasText) {
-				continue;
-			}
-			if (!children.every((c) => c.dataset && c.dataset.ref)) {
-				continue;
-			}
-			// Compute each child's source index path for stable comparison.
-			const paths: (number[] | null)[] = children.map((el) => {
-				const mapped = findElement(el, source as Node);
-				if (!mapped) {
-					return null;
-				}
-				const path: number[] = [];
-				let node: Node | null = mapped;
-				while (node && node.parentNode && node.parentNode.nodeType === 1) {
-					const parent = node.parentNode as Element;
-					const idx = Array.prototype.indexOf.call(parent.children, node);
-					if (idx === -1) {
-						return null;
-					}
-					path.unshift(idx);
-					node = parent;
-				}
-				return path;
-			});
-			if (paths.some((p) => p === null)) {
-				continue;
-			}
-			const paired = children.map((el, i) => ({
-				el,
-				path: paths[i] as number[],
-			}));
-			const needsSort = paired.some(
-				(p, i) => i > 0 && compare(paired[i - 1].path, p.path) > 0,
-			);
-			if (!needsSort) {
-				continue;
-			}
-			paired.sort((x, y) => compare(x.path, y.path));
-			// Re-append in source order (appendChild moves existing nodes).
-			for (const p of paired) {
-				container.appendChild(p.el);
-			}
-		}
-	}
-
-	addOverflowNodes(dest: HTMLElement, source: Node): void {
-		// Since we are modifying source as we go, we need to remember what
-		Array.from(source.childNodes).forEach((item) => {
-			if (isText(item)) {
-				// If we get to a text node, we assume for now an earlier element
-				// would have prevented duplication.
-				dest.append(item);
-			} else {
-				let match = findElement(item, dest);
-				if (match) {
-					this.addOverflowNodes(match as HTMLElement, item);
-				} else {
-					dest.appendChild(item);
-				}
-			}
-		});
-	}
-
-	/**
-	 * Add overflow to new page.
-	 *
-	 * @param {element} dest
-	 *   The page content being built.
-	 * @param {breakToken} breakToken
-	 *   The current break cotent.
-	 * @param {element} alreadyRendered
-	 *   The content that has already been rendered.
-	 *
-	 * @returns {void}
-	 */
-	addOverflowToPage(
-		dest: HTMLElement,
-		breakToken: BreakToken | undefined,
-		alreadyRendered?: DocumentFragment | Node,
-		source?: DocumentFragment | Node,
-	): void {
-		if (!dest) {
-			console.warn("paged-with-floats: addOverflowToPage called with null dest", new Error().stack);
-			return;
-		}
-		if (!breakToken || !breakToken.overflow.length) {
-			return;
-		}
-
-		let fragment: DocumentFragment | undefined;
-
-		// Ensure overflow content is rebuilt in source document order, even
-		// when residual sweeps appended out-of-order ranges to the token.
-		// Overflow nodes may be detached from the rendered tree (their range
-		// was already extracted), in which case compareDocumentPosition
-		// throws; fall back to comparing their mapped source elements via
-		// data-ref, whose order is stable regardless of extraction order.
-		const sourceOf = (node: Node | undefined | null): Node | undefined => {
-			if (!node) {
-				return undefined;
-			}
-			if (node.isConnected) {
-				return node;
-			}
-			const el = node.nodeType === 1 ? (node as Element) : node.parentElement;
-			const ref = el?.getAttribute?.("data-ref");
-			if (ref) {
-				try {
-					return findElement(el!, source as Node) || node;
-				} catch {
-					return node;
-				}
-			}
-			return node;
-		};
-		const sortedOverflows = breakToken.overflow.slice().sort((a, b) => {
-			if (!a?.node || !b?.node) {
-				return 0;
-			}
-			if (a.node === b.node) {
-				return (a.offset || 0) - (b.offset || 0);
-			}
-			const aSource = sourceOf(a.node);
-			const bSource = sourceOf(b.node);
-			try {
-				const pos = aSource!.compareDocumentPosition(bSource!);
-				if (pos & Node.DOCUMENT_POSITION_FOLLOWING) {
-					return -1;
-				}
-				if (pos & Node.DOCUMENT_POSITION_PRECEDING) {
-					return 1;
-				}
-			} catch {
-				// compareDocumentPosition can throw for nodes from different
-				// documents; leave the original order in that case.
-			}
-			return 0;
-		});
-
-		sortedOverflows.forEach((overflow) => {
-			if (!overflow || !overflow.content) {
-				return;
-			}
-			// A handy way to dump the contents of a fragment.
-			// console.log([].map.call(overflow.content.children, e => e.outerHTML).join('\n'));
-
-			fragment = rebuildTree(
-				overflow.node,
-				fragment,
-				alreadyRendered as Element | undefined,
-			);
-			// Find the parent to which overflow.content should be added.
-			// Overflow.content can be a much shallower start than
-			// overflow.node, if the range end was outside of the range
-			// start part of the tree. For this reason, we use a match against
-			// the parent element of overflow.content if it exists, or fall back
-			// to overflow.node's parent element.
-			let addTo = overflow.ancestor
-				? findElement(overflow.ancestor, fragment)
-				: fragment;
-			this.addOverflowNodes(addTo as HTMLElement, overflow.content);
-		});
-
-		// Record refs.
-		if (!fragment) {
-			return;
-		}
-		Array.from(fragment.querySelectorAll("[data-ref]")).forEach((ref) => {
-			let refId = ref.dataset.ref;
-			if (!dest.querySelector(`[data-ref='${refId}']`)) {
-				let refs = (dest as WithRefs).indexOfRefs;
-				if (!refs) {
-					refs = {};
-					(dest as WithRefs).indexOfRefs = refs;
-				}
-				refs[refId!] = ref as HTMLElement;
-			}
-		});
-
-		let tags = [
-			"overflow-tagged",
-			"overflow-partial",
-			"range-start-overflow",
-			"range-end-overflow",
-		];
-		tags.forEach((tag) => {
-			let camel = tag
-				.replace(/(?:^\w|[A-Z]|\b\w)/g, function (word, index) {
-					return index == 0 ? word.toLowerCase() : word.toUpperCase();
-				})
-				.replace(/[-\s]+/g, "");
-			let instances = fragment!.querySelectorAll(`[data-${tag}]`);
-			instances.forEach((instance) => {
-				delete instance.dataset[camel];
-			});
-		});
-
-		this.reorderBySourceOrder(fragment!, source);
-
-		dest.appendChild(fragment!);
-
-		// Floats can be carried across the break by the overflow path: their
-		// source copies are rebuilt here without ever passing through
-		// Layout.append, so the renderNode hook (which extracts page floats
-		// into the page's float containers) never fires for them. Extract
-		// them now, before the fresh page's bounds are measured. Placement
-		// marks nodes placed, so re-firing on nested matches is idempotent.
-		if (this.hooks && this.hooks.renderNode) {
-			Array.from(fragment!.querySelectorAll("[data-page-float]")).forEach(
-				(node) => {
-					let el = node as HTMLElement;
-					if (!el.dataset || el.dataset.pageFloatPlaced) {
-						return;
-					}
-					this.hooks.renderNode!.triggerSync(el, el, this);
-				},
-			);
-		}
-
-		this.hooks && this.hooks.afterOverflowAdded.trigger(dest);
-		this.invalidateBounds();
-	}
-
-	/**
-	 * Add text to new page.
-	 *
-	 * @param {element} node
-	 *   The node being appended to the destination.
-	 * @param {element} dest
-	 *   The destination to which content is being added.
-	 * @param {element} source
-	 *   The source DOM
-	 * @param {breakToken} breakToken
-	 *   The current breakToken.
-	 * @param {bool} shallow
-	 *	 Whether to do a shallow copy of the node.
-	 * @param {bool} rebuild
-	 *   Whether to rebuild parents.
-	 *
-	 * @returns {ChildNode}
-	 *   The cloned node.
-	 */
-	append(
-		node: Node,
-		dest: HTMLElement,
-		source: DocumentFragment | Node,
-		breakToken: BreakToken | null | undefined,
-		shallow = true,
-		rebuild = true,
-	): ChildNode {
-		let clone = cloneNode(node, !shallow) as ChildNode;
-
-		if (node.parentNode && isElement(node.parentNode)) {
-			let parent = findElement(node.parentNode, dest);
-			if (parent) {
-				replaceOrAppendElement(parent as HTMLElement, clone);
-			} else if (rebuild) {
-				let fragment = rebuildTree(
-					node.parentElement!,
-					undefined,
-					source as unknown as Element,
-				);
-				parent = findElement(node.parentNode, fragment);
-				replaceOrAppendElement(parent! as HTMLElement, clone);
-				dest.appendChild(fragment);
-			} else {
-				dest.appendChild(clone);
-			}
-		} else {
-			dest.appendChild(clone);
-		}
-
-		if ((clone as HTMLElement).dataset && (clone as HTMLElement).dataset.ref) {
-			let refs = (dest as WithRefs).indexOfRefs;
-			if (!refs) {
-				refs = {};
-				(dest as WithRefs).indexOfRefs = refs;
-			}
-			refs[(clone as HTMLElement).dataset.ref!] = clone as HTMLElement;
-		}
-
-		let nodeHooks = this.hooks.renderNode.triggerSync(clone, node, this);
-		nodeHooks.forEach((newNode) => {
-			if (typeof newNode != "undefined") {
-				clone = newNode as ChildNode;
-			}
-		});
-
-
-		this.invalidateBounds();
-
-		return clone;
-	}
-
-	rebuildTableFromBreakToken(
-		breakToken: BreakToken | undefined,
-		dest: HTMLElement,
-		source: DocumentFragment | Node,
-	): void {
-		if (!breakToken || !breakToken.node) {
-			return;
-		}
-		let node = breakToken.node;
-		let td: HTMLTableCellElement | null = isElement(node)
-			? (node as Element).closest("td")
-			: node.parentElement!.closest("td");
-		if (td) {
-			let rendered = findElement(td, dest, true);
-			if (!rendered) {
-				return;
-			}
-			while ((td = td.nextElementSibling as HTMLTableCellElement | null)) {
-				this.append(td, dest, source, null, true);
-			}
-		}
-	}
-
 	async waitForImages(imgs: NodeListOf<HTMLImageElement>): Promise<void> {
-		let results = Array.from(imgs).map(async (img) => {
-			return this.awaitImageLoaded(img);
-		});
-		await Promise.all(results);
+		await Promise.all(Array.from(imgs).map((img) => this.awaitImageLoaded(img)));
 	}
 
+	/**
+	 * Resolves when the image has settled: immediately when already
+	 * complete, otherwise on load/error with the image's computed size.
+	 */
 	async awaitImageLoaded(image: HTMLImageElement): Promise<unknown> {
+		if (image.complete === true) {
+			return undefined;
+		}
 		return new Promise((resolve) => {
-			if (image.complete !== true) {
-				image.onload = function () {
-					let { width, height } = window.getComputedStyle(image);
-					(resolve as (...args: unknown[]) => void)(width, height);
-				};
-				image.onerror = function (e) {
-					let { width, height } = window.getComputedStyle(image);
-					(resolve as (...args: unknown[]) => void)(width, height, e);
-				};
-			} else {
-				let { width, height } = window.getComputedStyle(image);
-				(resolve as (...args: unknown[]) => void)(width, height);
-			}
+			const settle = (value?: unknown) => {
+				image.onload = null;
+				image.onerror = null;
+				resolve(value);
+			};
+			image.onload = () => {
+				const style = getComputedStyle(image);
+				settle([style.width, style.height]);
+			};
+			image.onerror = (event) => {
+				const style = getComputedStyle(image);
+				settle([style.width, style.height, event]);
+			};
 		});
 	}
+}
 
-	avoidBreakInside(node: Node, limiter: Node): Element | undefined {
-		let breakNode: Element | undefined;
+const SIDEBREAK_VALUES = ["left", "right", "recto", "verso"];
 
-		while (node.parentNode) {
-			if (node === limiter) {
-				break;
-			}
-
-			if (
-				isElement(node) &&
-				(node as Element).dataset.originalBreakInside === "avoid"
-			) {
-				breakNode = node;
-				break;
-			}
-
-			node = node.parentNode as unknown as Node;
-		}
-		return breakNode;
-	}
-
-	createOverflow(
-		overflow: Range,
-		rendered: HTMLElement,
-		source: DocumentFragment | Node,
-	): Overflow | undefined {
-		let container = overflow.startContainer;
-		let offset = overflow.startOffset;
-		let node: Node | null | undefined,
-			renderedNode: Element | null | undefined,
-			parent: Node | null | undefined,
-			index: number | undefined,
-			temp: Node | undefined;
-		let hyphen = (this.settings.hyphenGlyph as string) || "\u2011";
-		let topLevel = false;
-
-		if (isElement(container)) {
-			if (container.nodeName == "INPUT") {
-				temp = container;
-			} else {
-				temp = child(container, offset);
-			}
-
-			if (isElement(temp)) {
-				renderedNode = findElement(temp, rendered);
-
-				if (!renderedNode) {
-					// Find closest element with data-ref
-					let prevNode: Node | null | undefined = prevValidNode(temp);
-					if (prevNode && !isElement(prevNode)) {
-						prevNode = prevNode.parentElement;
-					}
-					if (!prevNode) {
-						return;
-					}
-					renderedNode = findElement(prevNode, rendered);
-					if (!renderedNode) {
-						return;
-					}
-					// Check if temp is the last rendered node at its level.
-					if (!temp.nextSibling) {
-						// We need to ensure that the previous sibling of temp is fully rendered.
-						const renderedNodeFromSource = findElement(
-							renderedNode,
-							source,
-						);
-						if (!renderedNodeFromSource) {
-							return;
-						}
-						const walker = document.createTreeWalker(
-							renderedNodeFromSource,
-							NodeFilter.SHOW_ELEMENT,
-						);
-						const lastChildOfRenderedNodeFromSource = walker.lastChild();
-						const lastChildOfRenderedNodeMatchingFromRendered = findElement(
-							lastChildOfRenderedNodeFromSource as Node,
-							rendered,
-						);
-						// Check if we found that the last child in source
-						if (!lastChildOfRenderedNodeMatchingFromRendered) {
-							// Pending content to be rendered before virtual break token
-							return;
-						}
-						// Otherwise we will return a break token as per below
-					}
-					// renderedNode is actually the last unbroken box that does not overflow.
-					// Break Token is therefore the next sibling of renderedNode within source node.
-					node = findElement(renderedNode as Node, source)!.nextSibling;
-					offset = 0;
-				} else {
-					node = findElement(renderedNode, source);
-					offset = 0;
-				}
-			} else {
-				if (container == rendered) {
-					parent = renderedNode = source as unknown as Element;
-					topLevel = true;
-				} else {
-					renderedNode = findElement(container, rendered);
-
-					if (!renderedNode) {
-						const prevNode = prevValidNode(container);
-						if (!prevNode) {
-							return;
-						}
-						renderedNode = findElement(prevNode, rendered);
-					}
-
-					if (!renderedNode) {
-						return;
-					}
-					parent = findElement(renderedNode, source);
-				}
-				const mapped = indexOfTextNodeForOverflow(
-					temp!,
-					renderedNode!,
-					parent! as Element,
-					hyphen,
-				);
-				index = mapped.index;
-				// No seperation for the first textNode of an element
-				if (index === 0) {
-					node = parent;
-					offset = 0;
-				} else {
-					node = child(parent! as Node, index!);
-					offset = 0;
-				}
-			}
-		} else {
-			renderedNode = findElement(container.parentNode as Node, rendered);
-
-			if (!renderedNode) {
-				const prevNode = prevValidNode(container.parentNode as Node);
-				if (!prevNode) {
-					return;
-				}
-				renderedNode = findElement(prevNode, rendered);
-			}
-			if (!renderedNode) {
-				return;
-			}
-			parent = findElement(renderedNode, source);
-			const mapped = indexOfTextNodeForOverflow(
-				container,
-				renderedNode!,
-				parent! as Element,
-				hyphen,
-			);
-			index = mapped.index;
-
-			if (index === -1) {
-				// We can't map to a precise text node. Anchor at the parent element
-				// so the overflow is carried forward instead of being dropped.
-				node = parent;
-				offset = 0;
-			} else {
-				node = child(parent! as Node, index!);
-
-				offset += node!.textContent!.indexOf(container.textContent!);
-			}
-		}
-
-		if (!node) {
-			return;
-		}
-
-		return new Overflow(
-			node,
-			offset,
-			overflow.getBoundingClientRect().height,
-			overflow,
-			topLevel,
-		);
-	}
-
-	/**
-	 * Recursively removes last child and it's ancestors if the nested parentElement is empty
-	 *
-	 * In case of empty table rows or similar
-	 *
-	 * @param {Element} parentElement
-	 * @param {Element} rootElement
-	 */
-	lastChildCheck(parentElement: Element, rootElement: WithRefs): void {
-		if (parentElement.childElementCount) {
-			this.lastChildCheck(parentElement.lastElementChild!, rootElement);
-		}
-
-		let refId = parentElement.dataset.ref;
-
-		// A table row, math element or paragraph from which all content has been removed
-		// can itself also be removed. It will be added on the next page.
-		if (
-			parentElement.dataset.overflowTagged &&
-			parentElement.textContent.trim() == ""
-		) {
-			(parentElement.parentNode as Node).removeChild(parentElement);
-		} else if (refId && rootElement.indexOfRefs && !rootElement.indexOfRefs[refId]) {
-			rootElement.indexOfRefs[refId] = parentElement as HTMLElement;
+/**
+ * Lexicographic comparison of two source index paths: element-wise numeric
+ * compare, with the shorter path first on equal prefixes.
+ */
+function compareSourcePaths(a: number[], b: number[]): number {
+	const length = Math.min(a.length, b.length);
+	for (let i = 0; i < length; i++) {
+		if (a[i] !== b[i]) {
+			return a[i] - b[i];
 		}
 	}
-
-	/**
-	 * Extends an overflow range backward so its tail carries at least one
-	 * word of flow text. Only acts when the range's content is empty of
-	 * text (whitespace or footnote-call anchors alone — a marker wrapped
-	 * past the column edge by itself); walks the block's text nodes in
-	 * reverse document order until the tail covers a real word (two word
-	 * characters — a trailing "." alone does not count) and moves the
-	 * range start to that word's beginning.
-	 *
-	 * @param {Range} range - The overflow range to adjust in place.
-	 * @returns {void}
-	 */
-	extendOverflowToWord(range: Range): void {
-		if (range.toString().trim()) {
-			return;
-		}
-
-		const wordRe = /(\S+)\s*$/;
-		const wordChars = (s: string) => s.replace(/[^\w]/g, "").length;
-		let root: Node = range.commonAncestorContainer;
-		if (isText(root)) {
-			root = root.parentNode as Node;
-		}
-		if (!root) {
-			return;
-		}
-
-		const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-		let current: Node | null = range.startContainer;
-		let currentOffset = range.startOffset;
-
-		// Position the walker at the node preceding the range start: the
-		// start container itself is the walker root's boundary when the
-		// range begins at it, and previousNode() would return nothing.
-		if (!isText(current)) {
-			const prev = current.childNodes[currentOffset - 1];
-			if (!prev) {
-				return;
-			}
-			current = prev;
-			currentOffset = Number.MAX_SAFE_INTEGER;
-		}
-		walker.currentNode = current;
-
-		let tailWordChars = 0;
-		let hops = 0;
-
-		while (current && hops < 60) {
-			hops++;
-			if (isText(current)) {
-				if (
-					(current.parentElement as HTMLElement | null)?.dataset
-						.note === "footnote"
-				) {
-					current = walker.previousNode();
-					continue;
-				}
-				const before = current.data.slice(0, currentOffset);
-				const match = wordRe.exec(before);
-				if (match && wordChars(match[1]) + tailWordChars >= 2) {
-					range.setStart(
-						current,
-						match.index + match[0].length - match[1].length,
-					);
-					return;
-				}
-				tailWordChars += match ? wordChars(match[1]) : 0;
-			}
-			current = walker.previousNode();
-			currentOffset = Number.MAX_SAFE_INTEGER;
-		}
-	}
-
-	/**
-	 * Converts overflowresults into a Breaktoken objects
-	 *
-	 * Proccesses overflow result
-	 *
-	 * -> Called only from findBreakToken
-	 *
-	 * @param {List} overflow - overflow ranges
-	 * @param {Element} rendered - page content div
-	 */
-	processOverflowResult(
-		ranges: Range[],
-		rendered: HTMLElement,
-		source: DocumentFragment | Node,
-		bounds: DOMRect,
-		prevBreakToken: BreakToken | undefined,
-		node: Node | null,
-		extract?: boolean,
-	): BreakToken {
-		let breakToken: BreakToken | undefined,
-			breakLetter: string | undefined;
-
-		ranges.forEach((overflowRange) => {
-			let overflowHooks = this.hooks.onOverflow.triggerSync(
-				overflowRange,
-				rendered,
-				bounds,
-				this,
-			);
-			overflowHooks.forEach((newOverflow) => {
-				if (typeof newOverflow != "undefined") {
-					overflowRange = newOverflow as Range;
-				}
-			});
-
-			// A continuation fragment must carry at least one word of
-			// content: when the overflow range holds only a footnote-call
-			// anchor (the marker wrapped past the column edge on its own),
-			// extend it backward over the last word of the kept text so the
-			// call is not orphaned on the next page.
-			this.extendOverflowToWord(overflowRange);
-
-			let overflow = this.createOverflow(overflowRange, rendered, source);
-			if (!overflow) {
-				// The rendered range could not be mapped back to the source
-				// (e.g. its nodes were detached during a residual sweep);
-				// skip it rather than crash on a null break token.
-				return;
-			}
-			if (!breakToken) {
-				breakToken = new BreakToken(node!, [overflow]);
-			} else {
-				breakToken.overflow.push(overflow);
-			}
-
-			// breakToken is nullable
-			let breakHooks = this.hooks.onBreakToken.triggerSync(
-				breakToken,
-				overflowRange,
-				rendered,
-				this,
-			);
-			breakHooks.forEach((newToken) => {
-				if (typeof newToken != "undefined") {
-					breakToken = newToken as BreakToken;
-				}
-			});
-
-			// Stop removal if we are in a loop
-			if (breakToken.equals(prevBreakToken as BreakToken)) {
-				return;
-			}
-
-			if (overflow?.node && overflow?.offset && overflow?.node?.textContent) {
-				breakLetter = overflow.node.textContent!.charAt(overflow.offset);
-			} else {
-				breakLetter = undefined;
-			}
-
-			if (overflow?.node && extract) {
-				overflow.ancestor = findElement(
-					overflow.range!.commonAncestorContainer,
-					source,
-				);
-				overflow.content = this.removeOverflow(overflowRange, breakLetter);
-			}
-		});
-
-		// For each overflow that is removed, see if we have an empty td that can be removed.
-		// Also check that the data-ref is set so we get all the split-froms and tos. If a copy
-		// of a node wasn't shallow, the indexOfRefs entry won't be there yet.
-		ranges.forEach((overflowRange) => {
-			this.lastChildCheck(rendered, rendered);
-		});
-
-		// And then see if the last element has been completely removed and not split.
-		if (
-			(rendered as WithRefs).indexOfRefs &&
-			extract &&
-			breakToken &&
-			breakToken.overflow.length
-		) {
-			let firstOverflow = breakToken.overflow[0];
-			if (firstOverflow?.node && firstOverflow.content) {
-				// Remove data-refs in the overflow from the index.
-				Array.from(
-					firstOverflow.content.querySelectorAll("[data-ref]"),
-				).forEach((ref) => {
-					let refId = ref.dataset.ref;
-					if (!rendered.querySelector(`[data-ref='${refId}']`)) {
-						delete (rendered as WithRefs).indexOfRefs![refId!];
-					}
-				});
-			}
-		}
-
-		if (breakToken) {
-			breakToken.overflow.forEach((overflow) => {
-				this.hooks &&
-					this.hooks.afterOverflowRemoved.trigger(
-						overflow.content,
-						rendered,
-						this,
-					);
-			});
-		}
-
-		return breakToken as BreakToken;
-	}
-
-	/**
-	 * Determines overflow of this layout and convert that into a breaktoken
-	 * -> Called by Layout.renderTo
-	 *
-	 * @param {Element} rendered - page content
-	 * @param {HTML} source - Source content
-	 * @param {DOMRect} bounds - Bounding rect
-	 * @param {BreakToken} prevBreakToken - previous BreakToken
-	 * @param {Element} node - Start node of the breakContent
-	 * @param {*} extract
-	 * @returns {BreakToken}
-	 */
-	findBreakToken(
-		rendered: HTMLElement,
-		source: DocumentFragment | Node,
-		bounds: DOMRect = this.bounds,
-		prevBreakToken?: BreakToken,
-		node: Node | null = null,
-		extract = true,
-	): BreakToken | undefined {
-		let breakToken: BreakToken | undefined,
-			overflow: Range[] = [];
-
-		let overflowResult = this.findOverflow(rendered, bounds, source);
-		let findOverflowGuard = 0;
-		while (overflowResult) {
-			if (++findOverflowGuard > 100) {
-				console.error(
-					"paged-with-floats: overflow collection guard exceeded; bailing out.",
-				);
-				break;
-			}
-			const result = overflowResult;
-			// Check whether overflow already added - multiple overflows might result in the
-			// same range via avoid break rules.
-			let existing = false;
-			overflow.forEach((item) => {
-				if (
-					item.startContainer == result.startContainer &&
-					item.endContainer == result.endContainer
-				) {
-					if (
-						item.startOffset >= result.startOffset &&
-						item.endOffset <= result.endOffset
-					) {
-						item.setStart(
-							result.startContainer,
-							result.startOffset,
-						);
-						existing = true;
-					}
-					if (
-						item.endOffset > result.endOffset &&
-						item.startOffset == result.startOffset
-					) {
-						(item as any).EndOffset = (result as any).EndOffset;
-						item.setEnd(result.endContainer, result.endOffset);
-						existing = true;
-					}
-				}
-			});
-			if (!existing) {
-				overflow.push(result);
-			}
-			overflowResult = this.findOverflow(rendered, bounds, source);
-		}
-
-		if (overflow.length) {
-			breakToken = this.processOverflowResult(
-				overflow,
-				rendered,
-				source,
-				bounds,
-				prevBreakToken,
-				node,
-				extract,
-			);
-
-			if (breakToken && extract) {
-				this.extractResidualOverflow(
-					rendered,
-					bounds,
-					source,
-					breakToken,
-					prevBreakToken,
-				);
-			}
-		}
-		return breakToken;
-	}
-
-	/**
-	 * Re-sweeps the page for overflow created by the extraction itself.
-	 *
-	 * Removing the overflowing tail of a paragraph changes how the kept
-	 * remainder wraps: hyphenation and justification of the partial
-	 * paragraph differ from the measured whole, so its tail can slip into
-	 * the spill column *after* the primary range collection finished. The
-	 * `data-overflow-tagged` marker — which deliberately suppresses
-	 * re-detection while a pass collects ranges — would hide that fresh
-	 * overflow, leaving text visibly stranded in the hidden column (a
-	 * "third column" the engine already decided to overflow). The marker is
-	 * cleared before each sweep pass and any residue is folded into the
-	 * existing break token, so the next page rebuilds it in document order.
-	 *
-	 * @param {HTMLElement} rendered - The page content wrapper.
-	 * @param {DOMRect} bounds - The page bounds.
-	 * @param {DocumentFragment|Node} source - The source content.
-	 * @param {BreakToken} breakToken - The token the residue appends to.
-	 * @param {BreakToken|undefined} prevBreakToken - The page's incoming
-	 * token, used as the loop guard by processOverflowResult.
-	 * @returns {void}
-	 */
-	private extractResidualOverflow(
-		rendered: HTMLElement,
-		bounds: DOMRect,
-		source: DocumentFragment | Node,
-		breakToken: BreakToken,
-		prevBreakToken: BreakToken | undefined,
-	): void {
-		let guard = 0;
-		// Extraction may have removed the container itself (e.g. an emptied
-		// paragraph that is then dropped); nothing left to sweep.
-		if (!rendered.isConnected) {
-			return;
-		}
-		this.inResidualSweep = true;
-		while (this.hasOverflow(rendered, bounds)) {
-			if (++guard > 10) {
-				console.warn(
-					"paged-with-floats: stopped re-extracting residual overflow on a page (guard limit)",
-				);
-				break;
-			}
-
-			// Make freshly re-wrapped content visible to detection again.
-			// Range markers must be cleared along with the tagged flag: a
-			// range-start left behind by the walk's own collection (whose
-			// range-end partner was already extracted) otherwise skips every
-			// sibling after it, blinding the sweep to the actual overflow.
-			rendered
-				.querySelectorAll(
-					"[data-overflow-tagged], [data-range-start-overflow], [data-range-end-overflow]",
-				)
-				.forEach((el) => {
-					el.removeAttribute("data-overflow-tagged");
-					el.removeAttribute("data-range-start-overflow");
-					el.removeAttribute("data-range-end-overflow");
-				});
-			rendered.removeAttribute("data-overflow-tagged");
-			rendered.removeAttribute("data-range-start-overflow");
-			rendered.removeAttribute("data-range-end-overflow");
-
-			try {
-				const range = this.findOverflow(rendered, bounds, source);
-				if (!range) {
-					break;
-				}
-
-				const residualToken = this.processOverflowResult(
-					[range],
-					rendered,
-					source,
-					bounds,
-					prevBreakToken,
-					breakToken.node as unknown as Node,
-					true,
-				);
-				if (residualToken && residualToken.overflow.length) {
-					breakToken.overflow.push(...residualToken.overflow);
-				} else {
-					// No progress (loop guard inside processOverflowResult
-					// bailed); stop rather than spin.
-					break;
-				}
-			} catch (error) {
-				// A degenerate page state must never abort pagination over a
-				// best-effort residual sweep; log and move on.
-				console.warn(
-					"paged-with-floats: residual overflow sweep failed: " +
-						(error instanceof Error ? error.message : String(error)),
-				);
-				break;
-			}
-		}
-		this.inResidualSweep = false;
-	}
-
-	/**
-	 * Sweeps every manual column of a page for overflow that appeared after
-	 * the page's last overflow check — for example the footnote area growing
-	 * and shrinking the flow host below already-laid-out text, or a split
-	 * paragraph re-wrapping slightly taller after its footnotes were pulled
-	 * out. Any residue found is folded into the outgoing break token so the
-	 * next page rebuilds it in document order.
-	 *
-	 * @param {HTMLElement} wrapper - The page's flow host (`.paged_flow`).
-	 * @param {DocumentFragment|Node} source - The source content.
-	 * @param {BreakToken} breakToken - The outgoing break token.
-	 * @param {BreakToken|undefined} prevBreakToken - The page's incoming token.
-	 * @returns {void}
-	 */
-	private sweepResidualColumnOverflow(
-		wrapper: HTMLElement,
-		source: DocumentFragment | Node,
-		breakToken: BreakToken,
-		prevBreakToken: BreakToken | undefined,
-	): void {
-		const previousEarliest = this.earliestOverflowNode(breakToken.overflow);
-
-		const pageColumns = wrapper.querySelectorAll(
-			":scope > .paged_columns > .paged_column",
-		);
-		for (const col of Array.from(pageColumns)) {
-			const column = col as HTMLElement;
-			const columnBounds = this.manualColumnBounds(column);
-			const spill = column.scrollHeight - column.clientHeight;
-			// The walk's break verification accepts a final line whose box
-			// ends inside its parent's bottom margin zone (up to the chain's
-			// bottom margin/padding/border, see textBreak's parentAdditions).
-			// The sweep must grant the same allowance, or it re-extracts
-			// content the walk legitimately placed — splitting a paragraph
-			// one line above its real break and desynchronizing the page.
-			const slack = this.trailingBottomSlack(column);
-			if (
-				spill - slack > OVERFLOW_TOLERANCE &&
-				this.hasOverflow(column, columnBounds)
-			) {
-				this.extractResidualOverflow(
-					column,
-					columnBounds,
-					source,
-					breakToken,
-					prevBreakToken,
-				);
-			}
-		}
-
-		// If the residual sweep pushed the break point earlier in the source,
-		// any blocks laid out after the new earliest point are now out of order
-		// on this page. Move them to the outgoing token and rewind to the new
-		// start so the next page renders everything in document order.
-		//
-		// This coalesce only makes sense when the residual overflow was caused
-		// by the footnote area growing mid-layout (which shrinks the flow host
-		// *below* content that is already laid out). On footnote-free pages the
-		// residual sweep still reports sub-pixel/shrunk-segment spills, and
-		// rewinding the whole page for those empties columns and drops content
-		// (Moby/Frankenstein regression). Gate the rewind on an actual,
-		// non-empty footnote area.
-		const newEarliest = this.earliestOverflowNode(breakToken.overflow);
-		if (newEarliest && newEarliest !== previousEarliest) {
-			const pageEl = wrapper.closest(".paged_page");
-			const footnoteArea = pageEl?.querySelector<HTMLElement>(
-				".paged_footnote_area",
-			);
-			const hasFootnotes =
-				!!footnoteArea && !!(footnoteArea.textContent || "").trim();
-			if (hasFootnotes) {
-				this.coalesceResidualOverflow(wrapper, source, breakToken);
-			}
-		}
-	}
-
-	/**
-	 * Returns the source node with the earliest document position among a set
-	 * of overflow entries, or undefined if the set is empty.
-	 */
-	private earliestOverflowNode(
-		overflows: Overflow[] | undefined,
-	): Node | undefined {
-		if (!overflows || !overflows.length) {
-			return;
-		}
-		let earliest: Node | undefined;
-		for (const overflow of overflows) {
-			if (!overflow?.node) {
-				continue;
-			}
-			if (!earliest) {
-				earliest = overflow.node;
-				continue;
-			}
-			try {
-				const pos = earliest.compareDocumentPosition(overflow.node);
-				if (pos & Node.DOCUMENT_POSITION_PRECEDING) {
-					earliest = overflow.node;
-				}
-			} catch {
-				// ignore
-			}
-		}
-		return earliest;
-	}
-
-	/**
-	 * When a residual sweep discovers overflow earlier than the break token's
-	 * existing overflow entries, any rendered blocks that follow that earliest
-	 * point in source order are still on the page out of order. Extract them
-	 * as separate overflows so the next page lays them out after the residual
-	 * content.
-	 *
-	 * @param {HTMLElement} wrapper - The page's flow host (`.paged_flow`).
-	 * @param {DocumentFragment|Node} source - The source content.
-	 * @param {BreakToken} breakToken - The outgoing break token.
-	 */
-	private coalesceResidualOverflow(
-		wrapper: HTMLElement,
-		source: DocumentFragment | Node,
-		breakToken: BreakToken,
-	): void {
-		if (!breakToken || !breakToken.overflow.length) {
-			return;
-		}
-
-		let earliest: Node | undefined;
-		for (const overflow of breakToken.overflow) {
-			if (!overflow?.node) {
-				continue;
-			}
-			if (!earliest) {
-				earliest = overflow.node;
-				continue;
-			}
-			try {
-				const pos = earliest.compareDocumentPosition(overflow.node);
-				if (pos & Node.DOCUMENT_POSITION_PRECEDING) {
-					earliest = overflow.node;
-				}
-			} catch {
-				// ignore cross-document comparisons
-			}
-		}
-		if (!earliest) {
-			return;
-		}
-
-		const blocks = Array.from(
-			wrapper.querySelectorAll(
-				":scope > .paged_columns > .paged_column > *, :scope > :not(.paged_float_top):not(.paged_float_bottom):not(.paged_float_spacer):not(.paged_columns)",
-			),
-		);
-
-		const removed = document.createDocumentFragment();
-
-		// The block containing the earliest overflow point is kept (its
-		// residual is already recorded). Any *later rendered fragment* of the
-		// same source element — its split continuation in a following column
-		// — must move as well, or it stays behind on this page while the
-		// extracted middle renders on the next one, breaking document order.
-		let keptSource: Element | undefined;
-
-		for (const block of blocks) {
-			if (
-				block.classList.contains("paged_float_top") ||
-				block.classList.contains("paged_float_bottom") ||
-				block.classList.contains("paged_float_spacer") ||
-				block.classList.contains("paged_columns")
-			) {
-				continue;
-			}
-			const ref = (block as HTMLElement).dataset?.ref;
-			if (!ref) {
-				continue;
-			}
-			const sourceEl = findElement(block, source);
-			if (!sourceEl) {
-				continue;
-			}
-			// Keep the first rendered fragment of the element containing the
-			// earliest overflow point; it is the one being split and its
-			// residual overflow is already recorded.
-			if (!keptSource && sourceEl.contains(earliest)) {
-				keptSource = sourceEl;
-				continue;
-			}
-			let isAfter: boolean;
-			if (keptSource && sourceEl === keptSource) {
-				isAfter = true;
-			} else {
-				try {
-					const pos = earliest.compareDocumentPosition(sourceEl);
-					isAfter = (pos & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
-				} catch {
-					continue;
-				}
-			}
-			if (!isAfter) {
-				continue;
-			}
-
-			const range = document.createRange();
-			range.selectNode(block);
-			const overflow = this.createOverflow(range, wrapper, source);
-			if (overflow) {
-				const fragment = this.removeOverflow(range);
-				overflow.content = fragment;
-				overflow.ancestor =
-					findElement(range.commonAncestorContainer, source) || undefined;
-				breakToken.overflow.push(overflow);
-				// Clone for the hook: appending the original would empty the
-				// fragment that `overflow.content` still references.
-				removed.appendChild(fragment.cloneNode(true));
-			} else {
-				// Fallback: move the block without a precise source mapping.
-				block.remove();
-				const fragment = document.createDocumentFragment();
-				Array.from(block.childNodes).forEach((child) => {
-					fragment.appendChild(child.cloneNode(true));
-				});
-				const fallback = new Overflow(sourceEl, 0, 0, undefined, true);
-				fallback.content = fragment;
-				removed.appendChild(fragment.cloneNode(true));
-				breakToken.overflow.push(fallback);
-			}
-		}
-
-		if (removed.childNodes.length) {
-			this.hooks &&
-				this.hooks.afterOverflowRemoved.trigger(removed, wrapper, this);
-		}
-
-		// The removed blocks are carried to the next page by the overflow
-		// entries just pushed (with their precise `node`/`offset`/`ancestor`/
-		// `content` anchors); `addOverflowToPage` rebuilds them in source order.
-		// The token's main break point stays untouched, so the walk resumes
-		// after the last moved block instead of re-rendering the split block
-		// already kept on this page (which duplicated content and emptied the
-		// next column).
-	}
-
-	/**
-	 * Does the element exceed the bounds?
-	 *
-	 * @param {element} element
-	 *   The element being constrained.
-	 * @param {array} bounds
-	 *   The bounding element.
-	 *
-	 * @returns {bool}
-	 *   Whether the element is within bounds.
-	 */
-	hasOverflow(element: HTMLElement, bounds: DOMRect = this.bounds): boolean {
-		let constrainingElement = element && (element.parentNode as Element); // this gets the element, instead of the wrapper for the width workaround
-		const isManualColumn =
-			constrainingElement &&
-			(constrainingElement as Element).classList &&
-			(constrainingElement as Element).classList.contains("paged_columns");
-		if (
-			constrainingElement &&
-			(constrainingElement as Element).classList &&
-			((constrainingElement as Element).classList.contains("paged_page_content") ||
-				// A manual column's content overflow does not grow the flex
-				// row it sits in; measure the column box itself.
-				isManualColumn)
-		) {
-			constrainingElement = element;
-		}
-		let { width, height } = element.getBoundingClientRect();
-		let scrollWidth = constrainingElement ? constrainingElement.scrollWidth : 0;
-		let scrollHeight = constrainingElement
-			? constrainingElement.scrollHeight
-			: 0;
-		if (
-			Math.max(Math.ceil(width), scrollWidth) > Math.ceil(bounds.width) ||
-			Math.max(Math.ceil(height), scrollHeight) > Math.ceil(bounds.height)
-		) {
-			return true;
-		}
-		// Manual columns are positioned below any top page floats, so their
-		// box can grow past the flow host's bottom edge while their height is
-		// still smaller than the host's height. Detect that by comparing the
-		// column's bottom edge to the host's bottom edge.
-
-		// Multicol blocks fragment internally: their spill-over lands in a
-		// hidden extra column (scrollWidth) or beyond a constrained height
-		// (scrollHeight) without growing the wrapper itself.
-		for (const frag of this.fragmentainers) {
-			if (frag === element || frag === constrainingElement) {
-				continue;
-			}
-			const fragBounds = frag.getBoundingClientRect();
-			if (
-				frag.scrollWidth >
-					Math.ceil(fragBounds.width) + COLUMN_EPSILON ||
-				frag.scrollHeight >
-					Math.ceil(fragBounds.height) + COLUMN_EPSILON
-			) {
-				return true;
-			}
-		}
-
-		return false;
-	}
-
-	/**
-	 * Sums padding, borders and margins for bottom/right of parent elements.
-	 *
-	 * Assumes no margin collapsing because we're considering overflow
-	 * on a page.
-	 *
-	 * This and callers need to be extended to handle right-to-left text and
-	 * flow but I'll get LTR going first in the hope that it will simplify
-	 * the task of getting RTL sorted later. Need test cases too.
-	 */
-	getAncestorPaddingBorderAndMarginSums(
-		element?: Element | null,
-		stopAtFragmentainer = false,
-	): Record<string, number> {
-		let attribs = [
-			"padding-top",
-			"padding-right",
-			"padding-bottom",
-			"padding-left",
-			"border-top-width",
-			"border-right-width",
-			"border-bottom-width",
-			"border-left-width",
-			"margin-top",
-			"margin-right",
-			"margin-bottom",
-			"margin-left",
-		];
-		let result: Record<string, number> = {};
-		attribs.forEach((attrib) => (result[attrib] = 0));
-
-		while (
-			element &&
-			!element.classList.contains("paged_page_content") &&
-			!element.classList.contains("paged_footnote_inner_content")
-		) {
-			if (
-				stopAtFragmentainer &&
-				this.fragmentainers.has(element) &&
-				element !== this.element
-			) {
-				break;
-			}
-			let style = window.getComputedStyle(element);
-			attribs.forEach(
-				(attrib) =>
-					(result[attrib] += parseInt(style.getPropertyValue(attrib))),
-			);
-			element = element.parentElement;
-		}
-
-		return result;
-	}
-
-	/**
-	 * Checks whether an element is within a table and gets any THEAD sizes.
-	 */
-	getAncestorTheadSizes(element?: Element | null): number {
-		let result = 0;
-
-		while (
-			element &&
-			!element.classList.contains("paged_page_content") &&
-			!element.classList.contains("paged_footnote_inner_content")
-		) {
-			if (element.tagName == "TABLE") {
-				element.childNodes.forEach((node) => {
-					if ((node as Element).tagName == "THEAD") {
-						let style = getComputedStyle(node as Element);
-						result += parseInt(style.height);
-					}
-				});
-			}
-			element = element.parentElement;
-		}
-
-		return result;
-	}
-
-	/**
-	 * Adds temporary data-split-to/from attribute where needed.
-	 *
-	 * @param DomElement element
-	 *   The deepest child, from which to start.
-	 */
-	addTemporarySplit(element?: Element | null, isTo = true): void {
-		this.temporaryIndex++;
-		let name = isTo ? "data-split-to" : "data-split-from";
-		while (
-			element &&
-			!element.classList.contains("paged_page_content") &&
-			!element.classList.contains("paged_footnote_inner_content")
-		) {
-			if (!element.getAttribute(name)) {
-				element.setAttribute(name, "temp-" + this.temporaryIndex);
-			}
-
-			element = element.parentElement;
-		}
-		this.invalidateBounds();
-	}
-
-	/**
-	 * Removes temporary data-split-to/from attribute where added.
-	 *
-	 * @param DomElement element
-	 *   The deepest child, from which to start.
-	 * @param boolean isTo
-	 *   Whether a split-to or -from was added.
-	 */
-	deleteTemporarySplit(element?: Element | null, isTo = true): void {
-		let name = isTo ? "data-split-to" : "data-split-from";
-		while (
-			element &&
-			!element.classList.contains("paged_page_content") &&
-			!element.classList.contains("paged_footnote_inner_content")
-		) {
-			let value = element.getAttribute(name);
-			if (value == "temp-" + this.temporaryIndex) {
-				element.removeAttribute(name);
-			}
-
-			element = element.parentElement;
-		}
-		this.invalidateBounds();
-	}
-
-	/**
-	 * Client rects for any node: elements and ranges directly, text nodes
-	 * via a range around their contents.
-	 */
-	nodeClientRects(node: Node): DOMRectList | undefined {
-		if (node instanceof Element || node instanceof Range) {
-			return getClientRects(node);
-		}
-		const range = document.createRange();
-		range.selectNodeContents(node);
-		return range.getClientRects();
-	}
-
-	/**
-	 * Returns the first child that overflows the bounds.
-	 *
-	 * There may be no children that overflow (the height might be extended
-	 * by a sibling). In this case, this function returns NULL.
-	 *
-	 * @param {node} node
-	 *   The parent node of the children we are searching.
-	 * @param {array} bounds
-	 *   The bounds of the page area.
-	 * @returns {ChildNode | null | undefined}
-	 *   The first overflowing child within the node.
-	 */
-	firstOverflowingChild(
-		node: Node,
-		bounds: DOMRect,
-	): ChildNode | null | undefined {
-		let bLeft = Math.ceil(bounds.left);
-		let bRight = Math.floor(bounds.right);
-		let bTop = Math.ceil(bounds.top);
-		let bBottom = Math.floor(bounds.bottom);
-		let result: ChildNode | null | undefined = undefined;
-		let skipRange = false;
-		let parentBottomPaddingBorder = 0,
-				parentBottomMargin = 0;
-		const nodeFrag = this.getFragmentainer(node);
-
-		if (isElement(node)) {
-			let result = this.getAncestorPaddingBorderAndMarginSums(node);
-			parentBottomPaddingBorder = result["border-bottom-width"];
-			parentBottomMargin = result["margin-bottom"];
-		}
-
-		for (const child of node.childNodes) {
-			if ((child as Element).tagName == "COLGROUP") {
-				continue;
-			}
-
-			let pos = getBoundingClientRect(child as Element)!;
-			let bottomMargin = 0;
-
-			// Whitespace between table rows and other unrendered text has no
-			// client rects. Its zero rect would read as "before the left edge"
-			// in the bounds comparison below, so it must never be treated as
-			// the start of an overflow.
-			if (isText(child) && pos.width === 0 && pos.height === 0) {
-				continue;
-			}
-
-			let hasStart = false;
-			let hasEnd = false;
-
-			if (isElement(child)) {
-				let styles = window.getComputedStyle(child);
-
-				bottomMargin = parseInt(styles.getPropertyValue("margin-bottom"));
-
-				hasStart =
-					(child as Element).dataset.rangeStartOverflow !== undefined;
-				hasEnd =
-					(child as Element).dataset.rangeEndOverflow !== undefined;
-
-				if (this.inResidualSweep) {
-					// During the residual sweep the bounds may have shrunk after
-					// the tags were written, so an element that carries a range
-					// marker can still overflow. Let the normal overflow check
-					// run for this child, but keep skipping true siblings that
-					// sit between a separate start/end pair.
-					if (hasStart && hasEnd) {
-						// collapsed range on this element: treat normally.
-					} else if (hasEnd) {
-						skipRange = false;
-						result = undefined;
-						continue;
-					} else if (hasStart) {
-						skipRange = true;
-						result = null;
-					}
-				} else {
-					// Normal overflow collection: range markers delimit content
-					// already assigned to an overflow range.
-					if (hasStart) {
-						skipRange = true;
-						result = null;
-					}
-					if (hasEnd) {
-						skipRange = false;
-						result = undefined;
-						continue;
-					}
-				}
-
-				if ((child as Element).dataset.overflowTagged !== undefined) {
-					continue;
-				}
-
-				// A child that is itself a fragmentainer overflows when its
-				// internal content spills past its own columns or capped
-				// height; its box alone never shows this.
-				if (this.fragmentainers.has(child)) {
-					const cb = this.fragmentainerBox(child);
-					if (
-						child.scrollWidth >
-							Math.ceil(cb.right - cb.left) + COLUMN_EPSILON ||
-						child.scrollHeight >
-							Math.ceil(cb.bottom - cb.top) + COLUMN_EPSILON
-					) {
-						return child;
-					}
-					continue;
-				}
-			} else {
-				bottomMargin = parentBottomMargin;
-			}
-
-			if (this.inResidualSweep) {
-				if (skipRange && !hasStart) {
-					continue;
-				}
-			} else if (skipRange) {
-				continue;
-			}
-
-			let left = Math.ceil(pos.left);
-			let right = Math.floor(pos.right);
-			let top = Math.ceil(pos.top);
-			let bottom = Math.floor(
-				pos.bottom +
-					bottomMargin +
-					(node.lastChild == child ? parentBottomPaddingBorder : 0),
-			);
-
-			if (!(pos.height + bottomMargin)) {
-				continue;
-			}
-
-			if (nodeFrag) {
-				// Fragmentainer-relative check over every client rect, since
-				// children fragmented across columns report union boxes.
-				const childAdditions =
-					bottomMargin +
-					(node.lastChild == child ? parentBottomPaddingBorder : 0);
-				const rects = this.nodeClientRects(child);
-				let overflows = false;
-				if (rects && rects.length) {
-					for (const fragment of Array.from(rects)) {
-						if (
-							this.rectOverflows(
-								fragment,
-								childAdditions,
-								nodeFrag,
-								bounds,
-							)
-						) {
-							overflows = true;
-							break;
-						}
-					}
-				} else {
-					overflows = this.rectOverflows(
-						pos,
-						childAdditions,
-						nodeFrag,
-						bounds,
-					);
-				}
-				if (overflows) {
-					return child;
-				}
-				continue;
-			}
-
-			if (left < bLeft || right > bRight || top < bTop || bottom > bBottom) {
-				return child;
-			}
-		}
-
-		return result;
-	}
-
-	removeHeightConstraint(element: Element): void {
-		// Inside a multicol block, the constraint is the fragmentainer's
-		// explicit height, not the pagebox height variable.
-		const frag = this.getFragmentainer(element);
-		if (frag && frag !== this.element) {
-			this.savedFragmentainerHeights.set(
-				frag,
-				(frag as HTMLElement).style.height,
-			);
-			(frag as HTMLElement).style.height = "auto";
-			this.addTemporarySplit(element.parentElement, false);
-			return;
-		}
-
-		let pageBox = element.parentElement!.closest(
-			".paged_page",
-		) as HTMLElement;
-		pageBox.style.setProperty("--paged-pagebox-height", "5000px");
-		this.addTemporarySplit(element.parentElement, false);
-		this.invalidateBounds();
-	}
-
-	restoreHeightConstraint(element: Element): void {
-		const frag = this.getFragmentainer(element);
-		if (frag && frag !== this.element) {
-			const saved = this.savedFragmentainerHeights.get(frag);
-			(frag as HTMLElement).style.height = saved ?? "";
-			this.savedFragmentainerHeights.delete(frag);
-			this.deleteTemporarySplit(element.parentElement, false);
-			return;
-		}
-
-		let pageBox = element.parentElement!.closest(
-			".paged_page",
-		) as HTMLElement;
-		this.deleteTemporarySplit(element.parentElement, false);
-		pageBox.style.removeProperty("--paged-pagebox-height");
-		this.invalidateBounds();
-	}
-
-	getUnconstrainedElementHeight(
-		element: Element,
-		includeAncestors = true,
-		includeTableHead = true,
-	): number {
-		this.removeHeightConstraint(element);
-		let unconstrainedHeight = getBoundingClientRect(element)!.height;
-		if (includeAncestors) {
-			let extra = this.getAncestorPaddingBorderAndMarginSums(
-				element.parentElement,
-			);
-			["top", "bottom"].forEach((direction) => {
-				unconstrainedHeight +=
-					extra[`padding-${direction}`] +
-					extra[`border-${direction}-width`] +
-					extra[`margin-${direction}`];
-			});
-		}
-		if (includeTableHead) {
-			unconstrainedHeight += this.getAncestorTheadSizes(element.parentElement);
-		}
-		this.restoreHeightConstraint(element);
-		return unconstrainedHeight;
-	}
-
-	getRange(rangeStart: Node, offset: number, rangeEnd?: Node): Range {
-		let range = document.createRange();
-		if (isText(rangeStart)) {
-			range.setStart(rangeStart, offset);
-		} else {
-			range.selectNode(rangeStart);
-		}
-
-		// Additional nodes may have been added that will overflow further beyond
-		// node. Include them in the range.
-		rangeEnd = rangeEnd || rangeStart;
-		range.setEndAfter(rangeEnd);
-		return range;
-	}
-
-	startOfNewOverflow(
-		startNode: Node,
-		rendered: HTMLElement,
-		bounds: DOMRect,
-	): [ChildNode | null | undefined, boolean] {
-		let node = startNode as ChildNode | null | undefined;
-		let childNode: ChildNode | null | undefined,
-			done = false;
-		let prev: ChildNode | null | undefined;
-		let anyOverflowFound = false;
-		let topNode: Node = startNode;
-
-		do {
-			prev = node;
-			do {
-				let parentBottomPaddingBorder: number,
-					parentBottomMargin: number;
-				childNode = this.firstOverflowingChild(node!, bounds);
-				if (childNode) {
-					anyOverflowFound = true;
-				} else if (childNode === undefined) {
-					// The overflow isn't caused by children. It could be caused by:
-					// * a sibling div / td / element with height that stretches this
-					//   element
-					// * margin / padding on this element
-					// In the former case, we want to ignore this node and take the
-					// sibling. In the later case, we want to move this node.
-					let intrinsicBottom = 0,
-							intrinsicRight = 0;
-					let childBounds = getBoundingClientRect(node as Element)!;
-					if (isElement(node)) {
-						// Assume that any height is the result of matching the
-						// height of surrounding content if there's no content.
-						let result = this.getAncestorPaddingBorderAndMarginSums(
-							node as Element,
-						);
-						parentBottomPaddingBorder =
-							result["border-bottom-width"] + result["padding-bottom"];
-						parentBottomMargin = result["margin-bottom"];
-
-						if (node.childNodes.length) {
-							let lastChild = node.lastChild;
-							if (
-								(isText(lastChild) &&
-									!(node as Element).dataset.overflowTagged) ||
-								(!isText(lastChild) &&
-									!(lastChild as Element).dataset.overflowTagged)
-							) {
-								childBounds = getBoundingClientRect(lastChild as Element)!;
-								intrinsicRight = childBounds.right;
-								intrinsicBottom = childBounds.bottom;
-							}
-						} else {
-							// Do we count this node even though it has no children?
-							// Seems to only be needed for BR.
-							if (node instanceof HTMLBRElement) {
-								intrinsicRight = childBounds.right;
-								intrinsicBottom = childBounds.bottom;
-							}
-						}
-					} else {
-						intrinsicRight = childBounds.right;
-						intrinsicBottom = childBounds.bottom;
-
-						let result = this.getAncestorPaddingBorderAndMarginSums(
-							node!.parentElement,
-						);
-						parentBottomPaddingBorder = result["border-bottom-width"];
-						parentBottomMargin = result["margin-bottom"];
-					}
-					intrinsicBottom += parentBottomPaddingBorder + parentBottomMargin;
-					const intrinsicRect = new DOMRect(
-						intrinsicRight,
-						intrinsicBottom,
-						0,
-						0,
-					);
-					if (
-						!this.rectOverflows(
-							intrinsicRect,
-							0,
-							this.getFragmentainer(node!),
-							bounds,
-						)
-					) {
-					let ascended: boolean;
-					do {
-						ascended = false;
-						do {
-							node = node
-								? (node as Element).nextElementSibling
-								: null;
-						} while (node && (node as Element).dataset.overflowTagged);
-						if (!node && rendered !== prev) {
-							ascended = true;
-							prev = node = prev!.parentElement;
-						}
-					} while (ascended && node && node !== topNode);
-					if (!node || node == topNode) {
-						return [null, false];
-					}
-					} else {
-						// Node is causing the overflow via padding and margin or text content.
-						done = true;
-					}
-				} else {
-					// childNode is null. Overflowing children have been ignored and no other
-					// overflowing children were found. Check the node's next sibling or one of
-					// an ancestor.
-					do {
-						while (node && !(node as Element).nextElementSibling) {
-							if (node == rendered) {
-								return [null, false];
-							}
-							node = node!.parentElement;
-						}
-						if (!node) {
-							return [null, false];
-						}
-						do {
-							node = node
-								? (node as Element).nextElementSibling
-								: null;
-						} while (
-							node &&
-							(node as Element).nextElementSibling &&
-							(node as Element).dataset.overflowTagged
-						);
-					} while (node && (node as Element).dataset.overflowTagged);
-				}
-			} while (node && !childNode && !done);
-
-			if (node) {
-				node = childNode;
-			}
-		} while (node && !done);
-
-		return [prev, anyOverflowFound];
-	}
-
-	/**
-	 * Tagging elements and returns range of overflowing elements
-	 *
-	 * @param {Element} startOfOverflow - Start element of the overflow
-	 * @param {Node} rangeStart
-	 * @param {Node} rangeEnd
-	 * @param {DOMRect} bounds - page bounds
-	 * @param {Element} rendered - Current rendered page content
-	 * @returns
-	 */
-	tagAndCreateOverflowRange(
-		startOfOverflow: Node,
-		rangeStart: Node,
-		rangeEnd?: Node,
-		bounds?: DOMRect,
-		rendered?: HTMLElement,
-	): Range | undefined {
-		let offset: number | undefined = 0;
-
-		// Within a multicol block, text breaking is relative to the
-		// fragmentainer's own box rather than the page.
-		const rangeFrag = this.getFragmentainer(rangeStart);
-		const box = rangeFrag ? this.fragmentainerBox(rangeFrag) : bounds!;
-		let start = box.left;
-		let end = box.right;
-		let vStart = box.top;
-		let vEnd = box.bottom;
-		let range: Range | undefined;
-
-		if (isText(rangeStart) && rangeStart.textContent!.trim().length) {
-			offset = this.textBreak(rangeStart, start, end, vStart, vEnd);
-			if (offset === undefined) {
-				// Adding split-to changed the CSS and meant we don't need to
-				// split this node.
-				let next: Node | null = rangeStart;
-				while (!(next as Element).nextElementSibling) {
-					next = next!.parentElement;
-					if (next == rendered) {
-						return;
-					}
-				}
-				startOfOverflow = rangeStart = (next as Element)
-					.nextElementSibling!;
-			}
-		}
-
-		let previousElement = nodeBefore(rangeStart, rendered, true);
-		let shouldContinue = true;
-		let newRangeStart = rangeStart;
-		while (
-			!offset &&
-			previousElement &&
-			shouldContinue &&
-			((isText(newRangeStart) &&
-				(newRangeStart.parentElement!.dataset.previousBreakAfter == "avoid" ||
-					newRangeStart.parentElement!.dataset.breakBefore == "avoid")) ||
-				(!isText(newRangeStart) &&
-					((newRangeStart as Element).dataset.previousBreakAfter == "avoid" ||
-						(newRangeStart as Element).dataset.breakBefore == "avoid")))
-		) {
-			// We are trying to avoid putting a break at newRangeStart.
-			// See if we can move some of the content above into the overflow.
-			let newPreviousElement = nodeBefore(previousElement, rendered, true);
-			// Don't go back into stuff already rendered.
-			if (
-				!newPreviousElement ||
-				(isElement(newPreviousElement) && (newPreviousElement as Element).dataset.splitFrom)
-			) {
-				shouldContinue = false;
-			} else {
-				newRangeStart = previousElement;
-				previousElement = newPreviousElement;
-			}
-		}
-
-		if (shouldContinue) {
-			// We found earlier content that doesn't want to avoid having a break after it.
-			// newRangeStart is the next node (new overflow start).
-			rangeStart = newRangeStart;
-		}
-
-		// Set the start of the range and record on node or the previous element
-		// that overflow was moved.
-		let position: Node | null = rangeStart;
-		range = this.getRange(rangeStart, offset as number, rangeEnd);
-		if (isText(rangeStart)) {
-			if (rangeStart.parentElement) {
-				rangeStart.parentElement!.dataset.splitTo =
-					rangeStart.parentElement!.dataset.ref!;
-				rangeStart.parentElement!.dataset.rangeStartOverflow = String(true);
-				rangeStart.parentElement!.dataset.overflowTagged = String(true);
-				position = rangeStart.parentElement;
-			}
-		} else {
-			(rangeStart as Element).dataset.rangeStartOverflow = String(true);
-		}
-
-		rangeEnd = rangeEnd || rangeStart;
-		if (isElement(rangeEnd)) {
-			if (
-				rangeStart.parentElement!.closest(
-					`[data-ref='${rangeEnd.dataset.ref}']`,
-				)
-			) {
-				let nextNode = nodeAfter(rangeEnd);
-				if (nextNode) {
-					(nextNode as Element).dataset.rangeEndOverflow = String(true);
-					(nextNode as Element).dataset.overflowTagged = String(true);
-				} else {
-					// The range ends at the last rendered node. There is no
-					// following node to carry the range-end marker, so mark
-					// the range end itself; otherwise re-detection keeps
-					// returning the same range and never advances past the
-					// collected overflow.
-					rangeEnd.dataset.rangeEndOverflow = String(true);
-					rangeEnd.dataset.overflowTagged = String(true);
-				}
-			} else {
-				rangeEnd.dataset.rangeEndOverflow = String(true);
-				rangeEnd.dataset.overflowTagged = String(true);
-			}
-		} else {
-			if (rangeEnd.parentElement) {
-				(rangeEnd.parentElement as Element).dataset.rangeEndOverflow =
-					String(true);
-			}
-		}
-
-		// Add splitTo
-		while (position !== rendered && position) {
-			if (position!.previousSibling && position!.parentElement) {
-				position!.parentElement!.dataset.splitTo =
-					position!.parentElement!.dataset.ref!;
-			}
-			position = position!.parentElement;
-		}
-
-		// Tag ancestors in the range so we don't generate additional ranges
-		// that then cause problems when removing the ranges.
-		position = rangeStart;
-		while (
-			position &&
-			position.parentElement !== range!.commonAncestorContainer
-		) {
-			position = position!.parentElement;
-			if (position) {
-				(position as Element).dataset.overflowTagged = String(true);
-			}
-		}
-
-		if (isElement(position)) {
-			let stopAt: Node | null | undefined = rangeEnd;
-			while (
-				stopAt &&
-				stopAt.parentElement !== range!.commonAncestorContainer
-			) {
-				stopAt = stopAt.parentElement;
-			}
-
-			while (position !== stopAt && position) {
-				position = position!.nextSibling;
-				if (isElement(position)) {
-					position.dataset.overflowTagged = String(true);
-				}
-			}
-		} else if (position) {
-			position = position!.parentElement;
-		}
-		while (
-			position &&
-			!(position as Element).nextElementSibling &&
-			position !== rendered
-		) {
-			position = position!.parentElement;
-			if (position) {
-				(position as Element).dataset.overflowTagged = String(true);
-			}
-		}
-
-		return range;
-	}
-
-	/**
-	 * Number of body rows (rows outside the thead) that would remain on the
-	 * current page before `row` within its table. Zero means a break before
-	 * `row` would leave only the header group — and possibly a caption — on
-	 * this page.
-	 */
-	tableBodyRowsBefore(row: Element, table: Element): number {
-		let count = 0;
-		for (const tableRow of Array.from(
-			(table as HTMLTableElement).rows ?? [],
-		)) {
-			if (tableRow === row || (tableRow as Element) === row) {
-				break;
-			}
-			if (
-				!tableRow.closest("thead") &&
-				tableRow.closest("table") === table
-			) {
-				count++;
-			}
-		}
-		return count;
-	}
-
-	/**
-	 * Whether any visible content precedes `element` on the current page —
-	 * i.e. the element does not start the page's content.
-	 */
-	hasVisibleContentBefore(element: Element, rendered: HTMLElement): boolean {
-		let current: Node | null = element;
-		while (current && current !== rendered) {
-			let prev: ChildNode | null = (current as ChildNode)
-				.previousSibling;
-			while (prev) {
-				const target = isElement(prev)
-					? (prev as Element)
-					: prev.parentElement;
-				if (target && target !== rendered) {
-					const rect = getBoundingClientRect(target);
-					if (rect && rect.height > 0) {
-						return true;
-					}
-				}
-				prev = prev.previousSibling;
-			}
-			current = current.parentElement;
-		}
-		return false;
-	}
-
-	/**
-	 * When the overflow starts inside a table row, return the element the
-	 * break must be placed before: the row itself ("split between rows") —
-	 * or, when breaking before the row would leave a fragment containing
-	 * only the header group (and possibly a caption), the whole table,
-	 * caption included, which then moves to the next container (page or
-	 * column) and splits between rows from there — even when it is taller
-	 * than a full page. Moving the table is only skipped when it already
-	 * starts the page's content: moving it to the next container would then
-	 * never converge, so the header fragment stays and rows split from the
-	 * row in question. Rows asking not to be split (break-inside: avoid)
-	 * and rows taller than a full page are left to the existing machinery
-	 * (mid-row splitting, rowspan-aware breaking). Returns undefined for
-	 * both of those and when the node is not inside a row of a rendered
-	 * table.
-	 */
-	tableRowNeedsBreakAt(
-		node: Node,
-		rendered: HTMLElement,
-		bounds: DOMRect,
-	): Element | undefined {
-		const element = isElement(node)
-			? (node as Element)
-			: node.parentElement;
-		const row = element?.closest("tr");
-		if (!row || !row.isConnected || !rendered.contains(row)) {
-			return;
-		}
-		const rowBounds = getBoundingClientRect(row);
-		if (!rowBounds) {
-			return;
-		}
-		const height =
-			rowBounds.width > bounds.width
-				? this.getUnconstrainedElementHeight(row)
-				: rowBounds.height;
-		if (height > bounds.height) {
-			return;
-		}
-		const table = row.closest("table");
-		if (
-			table &&
-			table !== rendered &&
-			rendered.contains(table) &&
-			this.tableBodyRowsBefore(row, table) === 0 &&
-			this.hasVisibleContentBefore(table, rendered)
-		) {
-			// Only the header group (and possibly a caption) would remain on
-			// this page, and the page carries other content before the
-			// table: move the entire table.
-			return table;
-		}
-		if ((row as HTMLElement).dataset.originalBreakInside === "avoid") {
-			// The row opts out of splitting: defer to the existing
-			// break-inside/rowspan machinery instead of forcing a break
-			// before the row.
-			return;
-		}
-		return row;
-	}
-
-	rowspanNeedsBreakAt(
-		tableRow: Element,
-		rendered: HTMLElement,
-	): Element | undefined {
-		if (tableRow.nodeName !== "TR") {
-			return;
-		}
-
-		const table = parentOf(tableRow, "TABLE", rendered) as HTMLTableElement;
-		if (!table) {
-			return;
-		}
-
-		const rowspan = table.querySelector("[colspan]");
-		if (!rowspan) {
-			return;
-		}
-
-		let columnCount = 0;
-		for (const cell of Array.from(table.rows[0].cells)) {
-			columnCount += parseInt(cell.getAttribute("colspan") || "1");
-		}
-		if ((tableRow as HTMLTableRowElement).cells.length !== columnCount) {
-			let previousRow: HTMLTableRowElement | null =
-				tableRow as HTMLTableRowElement;
-			let previousRowColumnCount: number | undefined;
-			while (previousRow !== null) {
-				previousRowColumnCount = 0;
-				for (const cell of Array.from(previousRow.cells)) {
-					previousRowColumnCount += parseInt(
-						cell.getAttribute("colspan") || "1",
-					);
-				}
-				if (previousRowColumnCount === columnCount) {
-					break;
-				}
-				previousRow =
-					previousRow.previousElementSibling as HTMLTableRowElement | null;
-			}
-			if (previousRowColumnCount === columnCount) {
-				return previousRow!;
-			}
-		}
-	}
-
-	/**
-	 * Find the next overflow in the current layout. Tags overflowing content and returns the range of the overflowing content
-	 * -> Called by findBreakToken and afterLayout
-	 *
-	 * @param {Element} rendered - Current page rendered div
-	 * @param {DOMRect} bounds - ClientRect of the page
-	 * @param {HTML} source - Source html content
-	 * @returns {null | Range} range - null if there is no overflow.
-	 */
-	findOverflow(
-		rendered: HTMLElement,
-		bounds: DOMRect,
-		source?: DocumentFragment | Node,
-	): Range | undefined {
-		if (
-			!this.hasOverflow(rendered, bounds) ||
-			rendered.dataset.overflowTagged
-		) {
-			return;
-		}
-
-		// The pattern here is:
-		// Round the bounds towards the smaller rectangle (round up top & left and
-		// round down bottom and right) and round the content towards the larger
-		// rectangle (round down top and left and round up bottom and right). Then
-		// use > and < to check if bounds are exceeded. That way portions of pixels
-		// will be correctly handled - you can't render a fraction of a pixel so
-		// bounds should have any fraction treated like that pixel isn't available
-		// and content should have any fraction of a pixel treated like the whole
-		// pixel is required.
-		let anyOverflowFound: boolean;
-
-		// Find the deepest element that is the first in set of siblings with
-		// overflow. There may be others. We just take the first we find and
-		// are called again to check for additional instances.
-		let node: ChildNode | null = rendered,
-			startOfOverflow: ChildNode | null | undefined,
-			check: ChildNode | null;
-
-		while (isText(node)) {
-			node = node.nextElementSibling;
-		}
-
-		[startOfOverflow, anyOverflowFound] = this.startOfNewOverflow(
-			node!,
-			rendered,
-			bounds,
-		);
-
-		if (!anyOverflowFound) {
-			return;
-		}
-
-		// startOfNewOverflow can report overflow without pinning a start node
-		// (e.g. a detached text node after an extraction); without a concrete
-		// start there is no range to collect, so bail rather than crash.
-		if (!startOfOverflow) {
-			return;
-		}
-
-		let startOfOverflowIsText = isText(startOfOverflow);
-		if (
-			(startOfOverflowIsText &&
-				startOfOverflow!.parentElement!.dataset.overflowTagged) ||
-			(!startOfOverflowIsText &&
-				(startOfOverflow as Element).dataset.overflowTagged)
-		) {
-			return;
-		}
-
-		// The node we finished on may be within something asking not to have its
-		// contents split. It - or a parent - may also have to be split because
-		// the content is just too big for the page.
-		// Resolve those requirements, deciding on a node that will be split in
-		// the following way:
-		// 1) Prefer the smallest node we can (start with the one we ended on).
-		//    While going back up the ancestors, check that subsequent children
-		//    of the ancestor are all entirely in overflow too. If they are, we
-		//    can take a range starting at our initial node and going to the end
-		//    of the ancestor's children.
-
-		let rangeStart = (check = node = startOfOverflow!);
-		let visibleSiblings = false;
-		let rangeEnd: Node | null | undefined = rendered.lastElementChild;
-
-		do {
-			let checkBounds = getBoundingClientRect(check as Element)!;
-			let hasOverflow = this.rectOverflows(
-				checkBounds,
-				0,
-				this.getFragmentainer(check!),
-				bounds,
-			);
-
-			let rowspanNeedsBreakAt: Element | undefined;
-
-			// Tables must only split between rows. If the overflow starts
-			// inside a table row, break before that row instead — unless the
-			// row alone is taller than a full page, in which case a mid-row
-			// split is the only remaining option.
-			if (hasOverflow) {
-				const rowBreakAt = this.tableRowNeedsBreakAt(
-					check!,
-					rendered,
-					bounds,
-				);
-				if (rowBreakAt) {
-					rangeStart = rowBreakAt;
-					if (rowBreakAt.nodeName === "TABLE") {
-						// Whole-table move: the range must cover the table
-						// element itself (selectNode + setEndAfter), ending
-						// after it — an end inside the table would leave an
-						// empty table shell on this page.
-						rangeEnd = rowBreakAt;
-					} else {
-						const table = rowBreakAt.closest("table");
-						rangeEnd = (table ?? rendered).lastChild;
-					}
-					break;
-				}
-			}
-
-			if (hasOverflow && this.avoidBreakInside(check!, rendered)) {
-				rowspanNeedsBreakAt = this.rowspanNeedsBreakAt(
-					check! as Element,
-					rendered,
-				);
-				if (rowspanNeedsBreakAt) {
-					// No question - break earlier.
-					rangeStart = rowspanNeedsBreakAt;
-					rangeEnd = rendered.lastChild;
-					break;
-				} else {
-					// If there is an element with overflow and it is within a
-					// break-inside: avoid, we take the whole container, provided that it
-					// will fit on a page by itself. But calculating whether it will fit
-					// by itself is non-trivial. If it is within a dom structure, the
-					// space available will be reduced by the containers. We can use the
-					// current container (that will get duplicated) but there might be
-					// subtle differences in styling due to the split-from class being
-					// added. We therefore temporary add the split-from to the current
-					// structure and find out how much space we need for the whole thing.
-					//
-					// To calculate whether we must split the element, we need to know its
-					// unconstrained height. If it has been wrapped into another column
-					// by .paged_pagebox's display:grid, we need to temporarily lengthen
-					// the current column to get the maximum width it would take. Go from
-					// check's parent to simplify handling where check is a text node.
-					let unconstrainedHeight: number;
-					if (checkBounds.width > bounds.width) {
-						unconstrainedHeight = this.getUnconstrainedElementHeight(
-						check! as Element,
-					);
-					} else {
-						unconstrainedHeight = checkBounds.height;
-					}
-
-					let mustSplit = unconstrainedHeight > bounds.height;
-
-					if (!mustSplit) {
-						// Move the whole thing.
-						rangeStart = check;
-					}
-				}
-			}
-
-			let sibling: ChildNode | null = check,
-				siblingBounds: DOMRect | undefined;
-			do {
-				sibling = sibling!.nextSibling;
-				siblingBounds = sibling
-					? getBoundingClientRect(sibling as Element)
-					: undefined;
-			} while (sibling && !siblingBounds?.height);
-
-			if (sibling && siblingBounds?.height && !rowspanNeedsBreakAt) {
-				// Is the sibling entirely in overflow? If yes, so must all following
-				// siblings be - add them to this range; they can't have anything we
-				// want to keep on this page. A sibling that starts inside the
-				// visible area but extends past its bottom edge (e.g. a paragraph
-				// taller than the remaining space) is also overflow: leaving it
-				// behind strands it on the page and the same range gets
-				// re-detected forever.
-				const frag = this.getFragmentainer(sibling);
-				const siblingStartsBeyondVisible = this.rectOverflows(
-					new DOMRect(siblingBounds.left, siblingBounds.top, 0, 0),
-					0,
-					frag,
-					bounds,
-				);
-				const siblingEndsBeyondVisible = this.rectOverflows(
-					new DOMRect(siblingBounds.left, siblingBounds.bottom, 0, 0),
-					0,
-					frag,
-					bounds,
-				);
-				if (
-					(siblingStartsBeyondVisible || siblingEndsBeyondVisible) &&
-					!visibleSiblings
-				) {
-					if (!rowspanNeedsBreakAt) {
-						rangeEnd = check!.parentElement!.lastChild;
-					}
-				} else {
-					visibleSiblings = true;
-					rangeEnd = undefined;
-				}
-			}
-
-			// Get the columns widths and make them attributes so removal of
-			// overflow doesn't do strange things - they may be affecting
-			// widths on this page.
-			const checkParent = check!.parentElement;
-			if (checkParent) {
-				Array.from(checkParent.children).forEach((childNode) => {
-					let style = getComputedStyle(childNode);
-					(childNode as any).width = style.width;
-				});
-			}
-
-			if (
-				isElement(check) &&
-				Array.from(check.classList).filter((value) =>
-					["region-content", "paged_page_content"].includes(value),
-				).length
-			) {
-				break;
-			}
-			check = check!.parentElement;
-		} while (check && check !== rendered && check.parentElement);
-
-		return this.tagAndCreateOverflowRange(
-			startOfOverflow!,
-			rangeStart!,
-			rangeEnd as Node | undefined,
-			bounds,
-			rendered,
-		);
-	}
-
-	findEndToken(
-		rendered: HTMLElement,
-		source: DocumentFragment | Node,
-	): BreakToken | undefined {
-		if (rendered.childNodes.length === 0) {
-			return;
-		}
-
-		let lastChild: Node | null = rendered.lastChild;
-
-		let lastNodeIndex: number | undefined;
-		while (lastChild && lastChild.lastChild) {
-			if (!validNode(lastChild)) {
-				// Only get elements with refs
-				lastChild = lastChild.previousSibling;
-			} else if (!validNode(lastChild.lastChild)) {
-				// Deal with invalid dom items
-				lastChild = prevValidNode(lastChild.lastChild);
-				break;
-			} else {
-				lastChild = lastChild.lastChild;
-			}
-		}
-
-		if (isText(lastChild)) {
-			if ((lastChild.parentNode as Element).dataset.ref) {
-				lastNodeIndex = indexOf(lastChild);
-				lastChild = lastChild.parentNode as unknown as ChildNode;
-			} else {
-				lastChild = lastChild.previousSibling;
-			}
-		}
-
-		let original: Node | null | undefined = findElement(lastChild!, source);
-
-		if (lastNodeIndex) {
-			original = original!.childNodes[lastNodeIndex];
-		}
-
-		let after = nodeAfter(original as Node);
-
-		return this.breakAt(after);
-	}
-
-	/**
-	 * Finds the character offset at which this text node first exceeds the
-	 * available space.
-	 *
-	 * Fast path: predicts the break arithmetically via pretext line layout
-	 * (cached canvas measurements, no reflow per word) and verifies the
-	 * candidate with a couple of cheap DOM probes. Anything unsupported or
-	 * inconsistent falls back to the legacy word/letter walker.
-	 *
-	 * @returns offset, undefined (no break needed within this node), or
-	 * legacy fallback semantics otherwise.
-	 */
-	textBreak(
-		node: Text,
-		start: number,
-		end: number,
-		vStart: number,
-		vEnd: number,
-	): number | undefined {
-		// Margin bottom is needed when the node is in a block level element
-		// such as a table, grid or flex, where margins don't collapse.
-		// Temporarily add data-split-to as this may change margins too
-		// (It always does in current code but let's not assume that).
-		// With the split-to set, margin might be removed, resulting in us
-		// not actually needing to split this text. In that case, the return
-		// result will be undefined and the split should be done at the next
-		// node. In this case we also keep the data-split-to=foo so the
-		// styling that removes the need for the overflow remains active.
-		// "Margin" includes bottom padding and border in this calculation.
-
-		this.addTemporarySplit(node.parentElement);
-
-		const additions = this.getAncestorPaddingBorderAndMarginSums(
-			node.parentElement,
-			true,
-		);
-		const parentAdditions =
-			additions["padding-bottom"] +
-			additions["border-bottom-width"] +
-			additions["margin-bottom"];
-
-		let offset: number | undefined | null = undefined;
-		if (
-			this.settings.textMeasurement === "pretext" &&
-			!this.predictFallbacks.has(node)
-		) {
-			try {
-				offset = this.predictTextBreak(
-					node,
-					start,
-					end,
-					vStart,
-					vEnd,
-					parentAdditions,
-				);
-			} catch {
-				offset = null;
-			}
-			if (offset === null) {
-				this.predictFallbacks.add(node);
-			}
-			if (offset !== null && offset !== undefined) {
-				this.deleteTemporarySplit(node.parentElement);
-				if (node.textContent!.substring(0, offset).trim() == "") {
-					return 0;
-				}
-				return offset;
-			}
-			if (offset === undefined) {
-				// Prediction confidently found no break in this node.
-				this.deleteTemporarySplit(node.parentElement);
-				return undefined;
-			}
-		}
-
-		offset = this.legacyTextBreakCore(
-			node,
-			start,
-			end,
-			vStart,
-			vEnd,
-			parentAdditions,
-		);
-
-		// See comment above the addTemporarySplit call above for the offset ==
-		// undefined part of why we may leave the temporary split-to attribute in
-		// place. This should be overridden though if a break is to be avoided.
-		// In that case,
-		if (offset != undefined) {
-			this.deleteTemporarySplit(node.parentElement);
-		}
-
-		// Don't get tricked into doing a split by whitespace at the start of a string.
-		if (node.textContent!.substring(0, offset).trim() == "") {
-			return 0;
-		}
-
-		return offset;
-	}
-
-	/**
-	 * Legacy word/letter walker measuring every word (and boundary-word
-	 * letters) through DOM rects.
-	 *
-	 * TEMPORARY FALLBACK: kept only until parity testing proves the
-	 * pretext predictor handles every supported case; remove together with
-	 * the `textMeasurement` escape hatch and capability gates then.
-	 */
-	private legacyTextBreakCore(
-		node: Text,
-		start: number,
-		end: number,
-		vStart: number,
-		vEnd: number,
-		parentAdditions: number,
-	): number | undefined {
-		let wordwalker = words(node);
-		let left = 0;
-		let right = 0;
-		let top = 0;
-		let bottom = 0;
-		let word: Range | undefined,
-			next,
-			done,
-			pos: DOMRect | undefined;
-		let offset: number | undefined;
-
-		const frag = this.getFragmentainer(node);
-
-		while (!done) {
-			next = wordwalker.next();
-			word = next.value;
-			done = next.done;
-
-			if (!word) {
-				break;
-			}
-
-			pos = getBoundingClientRect(word)!;
-
-			left = Math.floor(pos!.left);
-			right = Math.floor(pos!.right);
-			top = pos!.top;
-			bottom = pos!.bottom;
-
-			if (frag) {
-				if (
-					this.rectOverflows(
-						new DOMRect(left, top, right - left, bottom - top),
-						parentAdditions,
-						frag,
-					)
-				) {
-					offset = word.startOffset;
-					break;
-				}
-				continue;
-			}
-
-			if (left > end || top > vEnd - parentAdditions) {
-				offset = word.startOffset;
-				break;
-			}
-
-			// The bounds won't be exceeded so we need >= rather than >.
-			// Also below for the letters.
-			if (right > end || bottom > vEnd - parentAdditions) {
-				let letterwalker = letters(word);
-				let letter, nextLetter, doneLetter;
-
-				while (!doneLetter) {
-					// Note that the letter walker continues to walk beyond the end of the word, until the end of the
-					// text node.
-					nextLetter = letterwalker.next();
-					letter = nextLetter.value;
-					doneLetter = nextLetter.done;
-
-					if (!letter) {
-						break;
-					}
-
-					pos = getBoundingClientRect(letter)!;
-					right = pos!.right;
-					bottom = pos!.bottom;
-
-					if (right > end || bottom > vEnd - parentAdditions) {
-						offset = letter.startOffset;
-						done = true;
-
-						break;
-					}
-				}
-			}
-		}
-
-		return offset;
-	}
-
-	/**
-	 * Pretext-backed fast path: predicts the break offset from cached
-	 * arithmetic line layout and verifies the candidate with at most a
-	 * handful of DOM probes.
-	 *
-	 * @returns an offset when confidently predicted, `undefined` when the
-	 * text provably fits the remaining space, or `null` to request the
-	 * legacy fallback.
-	 */
-	private predictTextBreak(
-		node: Text,
-		start: number,
-		end: number,
-		vStart: number,
-		vEnd: number,
-		parentAdditions: number,
-	): number | undefined | null {
-		const predictT0 = performance.now();
-		const result = this.predictTextBreakInner(
-			node,
-			start,
-			end,
-			vStart,
-			vEnd,
-			parentAdditions,
-		);
-		predictStats.predictMs += performance.now() - predictT0;
-		if (result === null) {
-			predictStats.fallbacks++;
-		}
-		return result;
-	}
-
-	private predictTextBreakInner(
-		node: Text,
-		start: number,
-		end: number,
-		vStart: number,
-		vEnd: number,
-		parentAdditions: number,
-	): number | undefined | null {
-		if (measurementCapabilities() === false) {
-			return rejectPrediction("capabilities");
-		}
-		const spec = buildFontSpec(node.parentElement);
-		if (!spec || spec.lineHeight <= 0) {
-			return rejectPrediction("font-spec");
-		}
-		const text = node.textContent || "";
-		if (!text.trim().length) {
-			return undefined;
-		}
-
-		const frag = this.getFragmentainer(node);
-		predictStats.predicts++;
-
-		if (!this.predictionVerified) {
-			predictStats.unverified++;
-		}
-
-		// Fast path (verified mode only): if the node's very last character
-		// sits within bounds, everything before it does too (fragments
-		// appear in flow order), so this node needs no break at all. One DOM
-		// probe replaces the entire prediction for the most common case —
-		// nodes that fit.
-		if (this.predictionVerified && !this.textEndOverflows(node, frag, parentAdditions)) {
-			predictStats.quickFits++;
-			return undefined;
-		}
-
-		// Word inventory is DOM-cheap (no layout work).
-		const wordList: Array<{ range: Range; startOffset: number }> = [];
-		const wordwalker = words(node);
-		for (;;) {
-			const next = wordwalker.next();
-			if (next.done || !next.value) {
-				break;
-			}
-			const w = next.value as Range;
-			wordList.push({ range: w, startOffset: w.startOffset });
-			if (wordList.length > 5000) {
-				return rejectPrediction("too-many-words");
-			}
-		}
-		if (wordList.length < 2) {
-			return rejectPrediction("too-few-words");
-		}
-
-		const r0 = getBoundingClientRect(wordList[0].range);
-		if (!r0) {
-			return rejectPrediction("no-first-rect");
-		}
-
-		// Trivial case: the node's first word already lies outside the
-		// available space (e.g. the whole node sits in hidden overflow
-		// territory after a sibling spilled). Breaking at its start matches
-		// the legacy verdict without any arithmetic.
-		if (
-			this.rectOverflows(
-				new DOMRect(r0.left, r0.top, r0.width, r0.height),
-				parentAdditions,
-				frag,
-			)
-		) {
-			return wordList[0].startOffset;
-		}
-
-		// The legacy walker early-exits at the break, so for short runs its
-		// handful of rect reads are cheaper than preparing text for
-		// measurement. Only engage the predictor when there is enough text
-		// for the arithmetic to pay off.
-		if (wordList.length < PREDICT_MIN_WORDS) {
-			return rejectPrediction("min-words");
-		}
-
-		// Resolve the column geometry the node lives in.
-		let colLeft: number,
-				colRight: number,
-				colBottom: number,
-				columnsRemaining: number;
-		let box: { left: number; top: number; right: number; bottom: number } | null = null;
-		let meta: FragmentainerMeta | null = null;
-		let stride = 0;
-		if (frag) {
-			box = this.fragmentainerBox(frag);
-			meta = this.getFragmentainerMeta(frag);
-			stride = meta.columnWidth + meta.gap;
-			const colIndex0 = Math.max(
-				0,
-				Math.min(meta.count - 1, Math.floor((r0.left - box.left + COLUMN_EPSILON) / stride)),
-			);
-			colLeft = box.left + colIndex0 * stride;
-			colRight = Math.min(colLeft + meta.columnWidth, box.right);
-			colBottom = box.bottom - parentAdditions;
-			columnsRemaining = meta.count - 1 - colIndex0;
-			if (colRight - colLeft < 4) {
-				return rejectPrediction("narrow-column");
-			}
-		} else {
-			colLeft = start;
-			colRight = end;
-			colBottom = vEnd - parentAdditions;
-			columnsRemaining = 0;
-		}
-
-		const lineHeight = spec.lineHeight;
-
-		// Reuse a prepared object for this text: prefer the eager warm-up
-		// entry (the whole document's texts, prepared once up front), then
-		// the pre-split original of a continuation suffix. Only when neither
-		// has it does this cost a fresh prepare.
-		const key = fontKey(spec);
-		const parentEl = node.parentElement as HTMLElement | null;
-		const refKey = parentEl?.dataset.ref || "";
-		let prepared: PreparedTextWithSegments | undefined;
-		let baseOffset = 0;
-		let truncated = false;
-		let reused = false;
-
-		const eagerList = refKey ? eagerPreparedTexts.get(refKey) : undefined;
-		if (eagerList && parentEl) {
-			const childIndex = textNodeIndexInParent(node, parentEl);
-			for (const entry of eagerList) {
-				if (
-					entry.childIndex === childIndex &&
-					entry.fontKey === key &&
-					entry.fullText.endsWith(text)
-				) {
-					baseOffset = entry.fullText.length - text.length;
-					prepared = entry.prepared;
-					reused = true;
-					break;
-				}
-			}
-		}
-
-		if (!prepared) {
-			const stored = refKey
-				? this.continuationPrepared.get(refKey)
-				: undefined;
-			if (
-				stored &&
-				stored.fontKey === key &&
-				stored.fullText.length > text.length &&
-				stored.fullText.endsWith(text)
-			) {
-				baseOffset = stored.fullText.length - text.length;
-				prepared = stored.prepared;
-				reused = true;
-			}
-		}
-
-		if (!prepared) {
-			truncated = text.length > PREDICT_MAX_CHARS;
-			const preparedText = truncated
-				? text.slice(0, PREDICT_MAX_CHARS)
-				: text;
-			const t0 = performance.now();
-			prepared = this.measure.prepare(preparedText, spec);
-			predictStats.prepareCalls++;
-			predictStats.prepareMs += performance.now() - t0;
-		}
-		predictStats.reuses += reused ? 1 : 0;
-
-		// Walk pretext lines through the column budget. The first line is
-		// partial (the node may continue after inline siblings); every
-		// following line uses the full column width. When a column's
-		// vertical budget is exhausted, remaining lines move to the next
-		// visible column; once those run out, the line marks the break.
-		//
-		// Canvas-measured widths can drift slightly below what DOM layout
-		// produces (rounding, kerning differences), making the model pack a
-		// word more per few lines than the browser does. Each attempt
-		// therefore narrows the wrapping width by a pixel or two — retries
-		// are pure arithmetic — while verification against real DOM rects
-		// still gates every acceptance.
-		let colIndex = 0;
-		if (meta && box) {
-			colIndex = Math.max(
-				0,
-				Math.min(meta.count - 1, Math.floor((r0.left - box.left + COLUMN_EPSILON) / stride)),
-			);
-		}
-
-		const startCursor = this.measure.offsetToCursor(prepared, baseOffset);
-
-		// Verification probe helpers, shared across attempts. Unused in the
-		// unverified mode.
-		const probeMemo = new Map<number, boolean | null>();
-		const overflows = (index: number): boolean | null => {
-			if (probeMemo.has(index)) {
-				return probeMemo.get(index)!;
-			}
-			const r = getBoundingClientRect(wordList[index].range);
-			const result =
-				!r
-					? null
-					: this.rectOverflows(
-							new DOMRect(
-								r.left,
-								r.top,
-								r.right - r.left,
-								r.bottom - r.top,
-							),
-							parentAdditions,
-							frag,
-						);
-			probeMemo.set(index, result);
-			return result;
-		};
-
-		let lastReject = "exhausted";
-		for (const shrink of this.predictionVerified
-			? PREDICT_WIDTH_SHRINKS_PX
-			: [0]) {
-			let y = r0.top;
-			let currentColRight = colRight;
-			let currentColIndex = colIndex;
-			let remaining = columnsRemaining;
-			let candidateCursor: LayoutCursor | null = null;
-
-			const wrapWidth = meta
-				? meta.columnWidth - shrink
-				: currentColRight - colLeft - shrink;
-
-			this.measure.walkLines(
-				prepared,
-				currentColRight - r0.left - shrink,
-				wrapWidth,
-				(line) => {
-					const lineBottom = y + lineHeight;
-					if (lineBottom <= colBottom + COLUMN_EPSILON) {
-						y = lineBottom;
-						return true;
-					}
-					if (remaining > 0 && meta && box) {
-						// Move the flow to the next visible column.
-						remaining--;
-						currentColIndex++;
-						currentColRight = Math.min(
-							box.left + currentColIndex * stride + meta.columnWidth,
-							box.right,
-						);
-						y = box.top;
-						if (y + lineHeight <= colBottom + COLUMN_EPSILON) {
-							y += lineHeight;
-							return true;
-						}
-					}
-					candidateCursor = line.start;
-					return false;
-				},
-				startCursor,
-			);
-
-			if (!candidateCursor) {
-				if (truncated) {
-					// Walk exhausted on the truncated prefix, not real text.
-					return rejectPrediction("truncated");
-				}
-				if (!this.predictionVerified) {
-					// Pure prediction says it fits; post-render auditing is
-					// responsible for catching divergence.
-					return undefined;
-				}
-				// Everything fit at this width; verify against the DOM tail.
-				const lastRect = getBoundingClientRect(
-					wordList[wordList.length - 1].range,
-				);
-				if (
-					!lastRect ||
-					this.rectOverflows(
-						new DOMRect(
-							lastRect.left,
-							lastRect.top,
-							lastRect.right - lastRect.left,
-							lastRect.bottom - lastRect.top,
-						),
-						parentAdditions,
-						frag,
-					)
-				) {
-					lastReject = "fits-mismatch";
-					continue; // retry narrower before giving up
-				}
-				return undefined;
-			}
-
-			// Map the predicted cursor to a character offset in this node
-			// and snap it to the word that begins the overflowing line.
-			const absOffset = this.measure.cursorToOffset(prepared, candidateCursor);
-			const candidateOffset = absOffset - baseOffset;
-			if (candidateOffset <= 0 || candidateOffset > text.length) {
-				return rejectPrediction("offset-range");
-			}
-			let j = 0;
-			for (let i = 0; i < wordList.length; i++) {
-				if (wordList[i].startOffset <= candidateOffset) {
-					j = i;
-				} else {
-					break;
-				}
-			}
-
-			if (!this.predictionVerified) {
-				// Accept the arithmetic break directly; an early break is
-				// typographically harmless, and late ones are caught by
-				// post-render auditing instead of per-break probes.
-				return wordList[j].startOffset;
-			}
-
-			// Verification probes: bounded nudges in either direction. The
-			// candidate word must not fit; the word before it must.
-			let nudges = 0;
-			while (j < wordList.length - 1 && overflows(j) === false && nudges < 3) {
-				// Prediction was conservative: the candidate still fits.
-				j++;
-				nudges++;
-			}
-			if (overflows(j) !== true) {
-				lastReject = "no-nonfit";
-				break; // narrower attempts only worsen this; stop
-			}
-			while (j > 0 && overflows(j - 1) === true && nudges < 6) {
-				// Prediction was late: the previous word already overflows.
-				j--;
-				nudges++;
-			}
-			if (j > 0 && overflows(j - 1) === true) {
-				lastReject = "prev-overlaps";
-				continue; // try narrower: an earlier break may verify
-			}
-
-			// A split will follow from this offset: remember the prepared
-			// object so continuation suffixes reuse it without re-preparing.
-			if (refKey && this.continuationPrepared.size >= CONTINUATION_CACHE_MAX) {
-				this.continuationPrepared.clear();
-			}
-			this.continuationPrepared.set(refKey, {
-				fullText: text,
-				fontKey: key,
-				prepared,
-			});
-
-			return wordList[j].startOffset;
-		}
-
-		return rejectPrediction(lastReject);
-	}
-
-	removeOverflow(overflow: Range, breakLetter?: string): DocumentFragment {
-		let { startContainer } = overflow;
-		let extracted = overflow.extractContents();
-
-		this.hyphenateAtBreak(startContainer, breakLetter);
-
-		return extracted;
-		this.invalidateBounds();
-	}
-
-	hyphenateAtBreak(startContainer: Node, breakLetter?: string): void {
-		if (isText(startContainer)) {
-			let startText = startContainer.textContent!;
-			let prevLetter = startText[startText.length - 1];
-
-			// Add a hyphen if previous character is a letter or soft hyphen
-			if (
-				(breakLetter &&
-					/^\w|\u00AD$/.test(prevLetter) &&
-					/^\w|\u00AD$/.test(breakLetter)) ||
-				(!breakLetter && prevLetter && /^\w|\u00AD$/.test(prevLetter))
-			) {
-				(startContainer.parentNode as Element).classList.add("paged_hyphen");
-				startContainer.textContent =
-					startContainer.textContent +
-					((this.settings.hyphenGlyph as string) || "\u2011");
-				recordHyphenationWarning(
-					this.element
-						.closest(".paged_page")
-						?.getAttribute("data-page-number") || undefined,
-				);
-			}
-		}
-		this.invalidateBounds();
-	}
-
-	equalTokens(
-		a?: { node?: Node; offset?: number } | null,
-		b?: { node?: Node; offset?: number } | null,
-	): boolean {
-		if (!a || !b) {
-			return false;
-		}
-		if (a["node"] && b["node"] && a["node"] !== b["node"]) {
-			return false;
-		}
-		if (a["offset"] && b["offset"] && a["offset"] !== b["offset"]) {
-			return false;
-		}
-		return true;
-	}
+	return a.length - b.length;
 }
 
 EventEmitter(Layout.prototype);
@@ -6793,3 +5531,4 @@ if (typeof window !== "undefined") {
 }
 
 export default Layout;
+

@@ -1,85 +1,124 @@
 /**
- * Gets the bounding client rectangle of an element.
- * Falls back to using Range if element.getBoundingClientRect is undefined.
+ * General-purpose, dependency-free helpers shared across the engine:
+ * thin geometry wrappers, identifier mints, selector building and
+ * escaping, CSS value flattening, and a promise-exposing deferred.
+ * This module sits at the bottom of the import graph and imports nothing.
+ */
+
+/**
+ * Local alias for the shape of a scheduler that runs `cb` at some later
+ * point of time and returns a numeric handle for it.
+ */
+type idleRequester = (cb: () => void) => number;
+
+/**
+ * Returns the bounding box of an element or range. Nodes that expose no
+ * box of their own (text nodes, comments, ...) are measured through a
+ * document range spanning the node and its descendants instead.
  *
- * @param {Element | Range} element - The DOM element (or range) to get the bounding rectangle for.
- * @returns {DOMRect | undefined} The bounding client rectangle or undefined if no element.
+ * @param {Element|Range} [element] - Element or range to measure.
+ * @returns {DOMRect|undefined} The bounding box, or undefined when no
+ * argument (or a falsy one) is given.
  */
 export function getBoundingClientRect(
 	element?: Element | Range,
 ): DOMRect | undefined {
 	if (!element) {
-		return;
+		return undefined;
 	}
-	let rect: DOMRect;
-	if (typeof element.getBoundingClientRect !== "undefined") {
-		rect = element.getBoundingClientRect();
-	} else {
-		const range = document.createRange();
-		range.selectNode(element as unknown as Node);
-		rect = range.getBoundingClientRect();
+
+	if (typeof element.getBoundingClientRect === "function") {
+		return element.getBoundingClientRect();
 	}
-	return rect;
+
+	const range = document.createRange();
+	range.selectNode(element as unknown as Node);
+	return range.getBoundingClientRect();
 }
 
 /**
- * Gets the client rectangles of an element.
- * Falls back to using Range if element.getClientRects is undefined.
+ * Returns the client rectangles of an element or range, one per CSS
+ * border box. Nodes that expose no rectangles of their own (text nodes,
+ * comments, ...) are measured through a document range spanning the node
+ * and its descendants instead.
  *
- * @param {Element | Range} element - The DOM element (or range) to get client rectangles for.
- * @returns {DOMRectList | undefined} The client rectangles or undefined if no element.
+ * @param {Element|Range} [element] - Element or range to measure.
+ * @returns {DOMRectList|undefined} The client rectangles, or undefined
+ * when no argument (or a falsy one) is given.
  */
 export function getClientRects(
 	element?: Element | Range,
 ): DOMRectList | undefined {
 	if (!element) {
-		return;
+		return undefined;
 	}
-	let rects: DOMRectList;
-	if (typeof element.getClientRects !== "undefined") {
-		rects = element.getClientRects();
-	} else {
-		const range = document.createRange();
-		range.selectNode(element as unknown as Node);
-		rects = range.getClientRects();
+
+	if (typeof element.getClientRects === "function") {
+		return element.getClientRects();
 	}
-	return rects;
+
+	const range = document.createRange();
+	range.selectNode(element as unknown as Node);
+	return range.getClientRects();
 }
 
 /**
- * Generates a UUID (version 4).
- * Based on: http://stackoverflow.com/questions/105034/how-to-create-a-guid-uuid-in-javascript
+ * Mints a version-4-shaped UUID string: 8-4-4-4-12 hex groups, a literal
+ * `4` opening the third group and one of `8`/`9`/`a`/`b` opening the
+ * fourth. Entropy comes from one Math.random draw per output character,
+ * folded together with the wall-clock time and, when available, a
+ * high-resolution timer reading. Time-biased and not cryptographically
+ * random, but distinct in practice.
  *
- * @returns {string} A UUID string.
+ * @returns {string} A 36-character UUID.
  */
 export function UUID(): string {
-	let d = new Date().getTime();
+	let time = Date.now();
 	if (
 		typeof performance !== "undefined" &&
 		typeof performance.now === "function"
 	) {
-		d += performance.now(); //use high-precision timer if available
+		time += performance.now();
 	}
-	return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
-		const r = ((d + Math.random() * 16) % 16) | 0;
-		d = Math.floor(d / 16);
-		return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
-	});
+
+	const hex = "0123456789abcdef";
+	let uuid = "";
+	for (let i = 0; i < 36; i++) {
+		if (i === 8 || i === 13 || i === 18 || i === 23) {
+			uuid += "-";
+			continue;
+		}
+		// One draw per character; the mutating clock value only breaks
+		// ties between identical draws and keeps the output time-seeded.
+		const draw = (Math.random() + (time % 89) / 89) % 1;
+		time = time * 31 + 17;
+		if (i === 14) {
+			uuid += "4";
+		} else if (i === 19) {
+			uuid += hex.charAt(8 + Math.floor(draw * 4));
+		} else {
+			uuid += hex.charAt(Math.floor(draw * 16));
+		}
+	}
+	return uuid;
 }
 
 /**
- * Find the position of an element in a NodeList.
+ * Returns the index of the first entry of `nodeList` that is the very
+ * same object as `element`, or -1 when the list is empty or holds no
+ * identical entry. Comparison is by identity, not structural equality.
  *
- * @param {Element} element - The element to find.
- * @param {NodeList} nodeList - The NodeList to search within.
- * @returns {number} The index of the element in the NodeList, or -1 if not found.
+ * @param {Element} element - The element to look for.
+ * @param {ArrayLike<Element>} nodeList - NodeList, HTMLCollection or
+ * plain array to scan.
+ * @returns {number} The 0-based position, or -1 when absent.
  */
 export function positionInNodeList(
 	element: Element,
 	nodeList: ArrayLike<Element>,
 ): number {
 	for (let i = 0; i < nodeList.length; i++) {
-		if (element === nodeList[i]) {
+		if (nodeList[i] === element) {
 			return i;
 		}
 	}
@@ -87,211 +126,237 @@ export function positionInNodeList(
 }
 
 /**
- * Finds a unique CSS selector for a given element.
- * The selector is unique within the element's document.
+ * Builds a CSS selector that identifies `ele` within its owner document,
+ * trying progressively more specific forms: a unique id, a bare root tag
+ * name, per-class selectors (optionally scoped by tag name and
+ * nth-child), and finally the full structural ancestor chain. Uniqueness
+ * is decided by document-wide match counts only; the single match is
+ * never verified to be `ele` itself. Although declared to return a
+ * string, the function returns undefined at runtime for elements that
+ * match none of the forms.
  *
- * @param {Element} ele - The element to find a selector for.
- * @returns {string} A unique CSS selector string.
+ * @param {Element} ele - The element to describe.
+ * @returns {string} The selector, or undefined (runtime only) when no
+ * form applies.
  */
 export function findCssSelector(ele: Element): string {
-	const doc = ele.ownerDocument;
-
+	// The escaper is resolved from the global window up front, before any
+	// other step; environments without window.CSS.escape fail here.
 	const cssEscape = window.CSS.escape;
 
-	if (
-		ele.id &&
-		doc.querySelectorAll("#" + cssEscape(ele.id)).length === 1
-	) {
-		return "#" + cssEscape(ele.id);
+	// 1. A unique id wins outright, wherever the element itself lives.
+	if (ele.id) {
+		const idSelector = "#" + cssEscape(ele.id);
+		if (ele.ownerDocument.querySelectorAll(idSelector).length === 1) {
+			return idSelector;
+		}
 	}
 
-	const tagName = ele.localName;
-	if (tagName === "html") {
+	// 2. Bare tag names for the structural roots of the document.
+	if (ele.localName === "html") {
 		return "html";
 	}
-	if (tagName === "head") {
+	if (ele.localName === "head") {
 		return "head";
 	}
-	if (tagName === "body") {
+	if (ele.localName === "body") {
 		return "body";
 	}
 
-	let selector: string | undefined,
-		index: number | undefined,
-		matches: NodeListOf<Element>;
+	// 3. One class at a time, three increasingly specific forms each.
 	if (ele.classList.length > 0) {
 		for (let i = 0; i < ele.classList.length; i++) {
-			selector = "." + cssEscape(ele.classList.item(i)!);
-			matches = doc.querySelectorAll(selector);
-			if (matches.length === 1) {
-				return selector;
+			const classSelector = "." + cssEscape(ele.classList.item(i)!);
+			if (ele.ownerDocument.querySelectorAll(classSelector).length === 1) {
+				return classSelector;
 			}
-			selector = cssEscape(tagName!) + selector;
-			matches = doc.querySelectorAll(selector);
-			if (matches.length === 1) {
-				return selector;
+
+			const tagAndClass = cssEscape(ele.localName) + classSelector;
+			if (ele.ownerDocument.querySelectorAll(tagAndClass).length === 1) {
+				return tagAndClass;
 			}
-			index = positionInNodeList(ele, ele.parentNode!.children) + 1;
-			selector = selector + ":nth-child(" + index + ")";
-			matches = doc.querySelectorAll(selector);
-			if (matches.length === 1) {
-				return selector;
+
+			const nth =
+				":nth-child(" +
+				(positionInNodeList(ele, ele.parentNode!.children) + 1) +
+				")";
+			const scoped = tagAndClass + nth;
+			if (ele.ownerDocument.querySelectorAll(scoped).length === 1) {
+				return scoped;
 			}
 		}
 	}
 
-	if (ele.parentNode !== doc && ele.parentNode?.nodeType === 1) {
-		index = positionInNodeList(ele, ele.parentNode.children) + 1;
-		selector =
-			findCssSelector(<Element>ele.parentNode) +
+	// 4. Full structural form: the parent's selector plus nth-child.
+	const parent = ele.parentNode;
+	if (parent && parent !== ele.ownerDocument && parent.nodeType === 1) {
+		const parentElement = parent as Element;
+		const nth =
+			":nth-child(" + (positionInNodeList(ele, parent.children) + 1) + ")";
+		return (
+			findCssSelector(parentElement) +
 			" > " +
-			cssEscape(tagName!) +
-			":nth-child(" +
-			index +
-			")";
+			cssEscape(ele.localName) +
+			nth
+		);
 	}
 
-	return selector!;
+	// 5. Declared string, undefined at runtime — a deliberate type lie.
+	return undefined as unknown as string;
 }
 
 /**
- * Returns the value of the first attribute found from the given list on the element.
+ * Returns the value of the first attribute from `attributes` that is
+ * present on `element`, checked in array order. A present-but-empty
+ * attribute returns "".
  *
- * @param {Element} element - The element to check attributes on.
- * @param {string[]} attributes - Array of attribute names to look for.
- * @returns {string | undefined} The attribute value, or undefined if none found.
+ * @param {Element} element - The element to read from.
+ * @param {string[]} attributes - Attribute names, in priority order.
+ * @returns {string|undefined} The first present attribute's value, or
+ * undefined when none is present.
  */
 export function attr(
 	element: Element,
 	attributes: string[],
 ): string | undefined {
-	for (let i = 0; i < attributes.length; i++) {
-		if (element.hasAttribute(attributes[i])) {
-			return element.getAttribute(attributes[i])!;
+	for (const name of attributes) {
+		if (element.hasAttribute(name)) {
+			return element.getAttribute(name) ?? undefined;
 		}
 	}
+	return undefined;
 }
 
 /**
- * Escapes a string for use in a CSS selector.
- * Allows # and . characters.
+ * Escapes an arbitrary string into a safe CSS selector fragment. A
+ * modified CSS.escape: unlike the native function it deliberately leaves
+ * `#`, `.` and selector-legal characters unescaped, so a value starting
+ * with `#` keeps working as an id selector (with a `.` escaped only when
+ * it would otherwise end that id). Control characters and leading digits
+ * are escaped as `\` + hex + space; other unsafe characters get a single
+ * backslash and no trailing space.
  *
- * @param {string} value - The string to escape.
- * @returns {string} The escaped string.
- * @throws {TypeError} If no argument is provided.
+ * @param {unknown} [value] - The value to escape; coerced with String().
+ * @returns {string} The escaped selector fragment.
+ * @throws {TypeError} When called with no argument at all.
  */
 export function querySelectorEscape(value?: unknown): string {
-	if (arguments.length == 0) {
+	if (arguments.length === 0) {
 		throw new TypeError("`CSS.escape` requires an argument.");
 	}
-	const string = String(value);
 
-	const length = string.length;
-	let index = -1;
-	let codeUnit: number;
+	const str = String(value);
 	let result = "";
-	const firstCodeUnit = string.charCodeAt(0);
-	while (++index < length) {
-		codeUnit = string.charCodeAt(index);
+	for (let i = 0; i < str.length; i++) {
+		const unit = str.charCodeAt(i);
 
-		if (codeUnit == 0x0000) {
+		if (unit === 0) {
 			result += "\uFFFD";
 			continue;
 		}
 
 		if (
-			(codeUnit >= 0x0001 && codeUnit <= 0x001f) ||
-			codeUnit == 0x007f ||
-			(index == 0 && codeUnit >= 0x0030 && codeUnit <= 0x0039) ||
-			(index == 1 &&
-				codeUnit >= 0x0030 &&
-				codeUnit <= 0x0039 &&
-				firstCodeUnit == 0x002d)
+			(unit >= 0x1 && unit <= 0x1f) ||
+			unit === 0x7f ||
+			(i === 0 && unit >= 0x30 && unit <= 0x39) ||
+			(i === 1 &&
+				unit >= 0x30 &&
+				unit <= 0x39 &&
+				str.charCodeAt(0) === 0x2d)
 		) {
-			result += "\\" + codeUnit.toString(16) + " ";
+			result += "\\" + unit.toString(16) + " ";
 			continue;
 		}
 
-		if (index == 0 && length == 1 && codeUnit == 0x002d) {
-			result += "\\" + string.charAt(index);
+		if (unit === 0x2d && str.length === 1) {
+			result += "\\-";
 			continue;
 		}
 
-		if (codeUnit == 0x002e) {
-			if (string.charAt(0) == "#") {
-				result += "\\.";
-				continue;
-			}
+		if (unit === 0x2e && str.charAt(0) === "#") {
+			result += "\\.";
+			continue;
 		}
 
 		if (
-			codeUnit >= 0x0080 ||
-			codeUnit == 0x002d ||
-			codeUnit == 0x005f ||
-			codeUnit == 35 || // Allow #
-			codeUnit == 46 || // Allow .
-			(codeUnit >= 0x0030 && codeUnit <= 0x0039) ||
-			(codeUnit >= 0x0041 && codeUnit <= 0x005a) ||
-			(codeUnit >= 0x0061 && codeUnit <= 0x007a)
+			unit >= 0x80 ||
+			unit === 0x2d ||
+			unit === 0x5f ||
+			unit === 0x23 ||
+			unit === 0x2e ||
+			(unit >= 0x30 && unit <= 0x39) ||
+			(unit >= 0x41 && unit <= 0x5a) ||
+			(unit >= 0x61 && unit <= 0x7a)
 		) {
-			result += string.charAt(index);
+			result += str.charAt(i);
 			continue;
 		}
 
-		result += "\\" + string.charAt(index);
+		result += "\\" + str.charAt(i);
 	}
 	return result;
 }
 
-/** A minimal shape shared by legacy "CSSValue" objects. */
+/**
+ * Minimal structural type for the legacy "CSSValue" objects produced by
+ * the CSS parser: any value plus an optional unit string.
+ */
 export interface CSSValue {
 	value: unknown;
 	unit?: string;
 }
 
 /**
- * Creates a deferred object with promise, resolve, and reject.
+ * A deferred: exposes a native promise together with the functions that
+ * settle it from the outside. The instance is frozen after construction;
+ * the first settle wins and later resolve/reject calls are ignored. The
+ * generic parameter is deliberately not enforced on `resolve`.
  */
 export class defer<T = void> {
+	/** Correlation handle, unique per instance. Purely informational. */
+	id!: string;
+	/** The promise settled by resolve/reject. */
+	promise!: Promise<T>;
+	/** Settles the promise; extra arguments follow native promise rules. */
 	resolve!: (...args: any[]) => void;
+	/** Rejects the promise; the first argument becomes the reason. */
 	reject!: (...args: any[]) => void;
-	id: string;
-	promise: Promise<T>;
 
 	constructor() {
 		this.id = UUID();
-
 		this.promise = new Promise<T>((resolve, reject) => {
-			this.resolve = resolve as (...args: any[]) => void;
-			this.reject = reject as (...args: any[]) => void;
+			this.resolve = resolve as unknown as (...args: any[]) => void;
+			this.reject = reject as unknown as (...args: any[]) => void;
 		});
 		Object.freeze(this);
 	}
 }
 
 /**
- * Uses requestIdleCallback if available, otherwise falls back to requestAnimationFrame.
+ * Idle-time scheduler, resolved once at module load from the global
+ * window: the native requestIdleCallback when present, otherwise
+ * requestAnimationFrame, otherwise undefined (Node, jsdom). Callers must
+ * null-check before use.
  */
-type FrameRequestCallbackShim = (cb: () => void) => number;
-
-const idleWindow = (
-	typeof window !== "undefined" ? window : undefined
-) as unknown as
-	| { requestIdleCallback?: FrameRequestCallbackShim; requestAnimationFrame: FrameRequestCallbackShim }
-	| undefined;
-
-export const requestIdleCallback: FrameRequestCallbackShim | undefined =
-	idleWindow && idleWindow.requestIdleCallback
-		? idleWindow.requestIdleCallback
-		: idleWindow
-			? idleWindow.requestAnimationFrame
-			: undefined;
+export const requestIdleCallback: idleRequester | undefined = (() => {
+	if (typeof window === "undefined") {
+		return undefined;
+	}
+	if (window.requestIdleCallback) {
+		return window.requestIdleCallback;
+	}
+	if (window.requestAnimationFrame) {
+		return window.requestAnimationFrame;
+	}
+	return undefined;
+})();
 
 /**
- * Converts a CSSValue object to a string representation.
+ * Flattens a CSS value object into a string: the stringified value with
+ * the unit appended when the unit is truthy.
  *
- * @param {CSSValue} obj - The CSSValue object.
- * @returns {string} The combined CSS value and unit string.
+ * @param {CSSValue} obj - The value (and optional unit) to flatten.
+ * @returns {string} E.g. "16px" for {value: 16, unit: "px"}.
  */
 export function CSSValueToString(obj: CSSValue): string {
 	return String(obj.value) + (obj.unit || "");

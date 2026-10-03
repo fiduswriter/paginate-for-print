@@ -1,5 +1,19 @@
+/**
+ * The high-level API facade of the pagination engine.
+ *
+ * A {@link Previewer} takes raw content (an element, a document fragment, an
+ * HTML string, or "whatever is in the page body"), a list of stylesheets and a
+ * render target, and orchestrates the full pipeline: CSS harvesting and
+ * processing (Polisher), handler-module instantiation, pagination (Chunker),
+ * post-render balancing, image settling and a render audit, returning a
+ * {@link FlowResult}.
+ *
+ * It is also an event hub: consumers subscribe with `on`/`once`/`off` to
+ * `page`, `rendering`, `rendered`, `size` and `atpages`. The emitter methods
+ * are mixed into the class prototype at module load time via the
+ * `event-emitter` package's default export.
+ */
 import EventEmitter from "event-emitter";
-
 import Hook from "../utils/hook.js";
 import Chunker from "../chunker/chunker.js";
 import Polisher from "../polisher/polisher.js";
@@ -9,21 +23,29 @@ import {
 	collectRenderWarnings,
 	rebalanceMulticolFinals,
 	rebalanceManualColumnFinals,
-	type OverflowViolation,
-	type RenderWarning,
+} from "../chunker/layout.js";
+import type {
+	OverflowViolation,
+	RenderWarning,
 } from "../chunker/layout.js";
 import type Page from "../chunker/page.js";
-
 import { initializeHandlers, registerHandlers } from "../utils/handlers.js";
 import type Handler from "../modules/handler.js";
 import type { PagedEventEmitter } from "../types/emitter.js";
 import type { PagedConfig } from "./polyfill.js";
 
+/** A length with a unit, e.g. `{ value: 8.5, unit: "in" }`. */
 export interface PageSize {
 	value: number;
 	unit: string;
 }
 
+/**
+ * Resolved page size. `format` is a named paper format (e.g. `"A4"`) when the
+ * size came from a named `@page size`, `orientation` is `"portrait"` or
+ * `"landscape"` when applicable; both are `undefined` for default/custom
+ * sizes.
+ */
 export interface Size {
 	width: PageSize;
 	height: PageSize;
@@ -31,25 +53,74 @@ export interface Size {
 	orientation?: string;
 }
 
+/**
+ * The value returned by {@link Previewer.preview}: the Chunker instance
+ * itself, augmented in place with the rendered pages, the chunking-only
+ * performance measurement, the effective page size and the render audit
+ * results.
+ */
 export type FlowResult = Chunker & {
 	pages: Page[];
 	performance?: number;
 	size?: Size;
-	/** Pages with content outside its designated space (post-render audit). */
 	overflowViolations?: OverflowViolation[];
-	/** Non-fatal rendering notices (sub-tolerance protrusions, hyphenation). */
 	warnings?: RenderWarning[];
 };
 
 /**
- * The main class responsible for preparing, chunking, styling, and rendering content into paginated previews.
+ * Comparator sorting a mixed list of `<style>` and `<link>` elements into
+ * document order using `compareDocumentPosition`. `PRECEDING` on the result
+ * means the second node precedes the first, so the first sorts after (return
+ * 1); `FOLLOWING` sorts the first before (return -1); any other combination
+ * returns 0, keeping the relative order (Array.prototype.sort is stable).
+ */
+function documentPositionComparator(
+	a: Element,
+	b: Element,
+): number {
+	const position = a.compareDocumentPosition(b);
+
+	if (position & Node.DOCUMENT_POSITION_PRECEDING) {
+		return 1;
+	}
+
+	if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
+		return -1;
+	}
+
+	return 0;
+}
+
+/**
+ * Maps one harvested stylesheet element to its stylesheet source: a `<style>`
+ * element becomes an object keyed by the current page URL with the CSS text
+ * as value, a `<link>` becomes its resolved `href`. The element is removed
+ * from the DOM in the process. Unknown elements warn and yield `undefined`.
+ */
+function harvestStylesheet(
+	element: Element,
+): string | Record<string, string> | undefined {
+	element.remove();
+
+	if (element instanceof HTMLStyleElement) {
+		return {
+			[window.location.href]: element.textContent!,
+		};
+	}
+
+	if (element instanceof HTMLLinkElement) {
+		return element.href;
+	}
+
+	console.warn(`Unable to process: ${element}, ignoring.`);
+	return undefined;
+}
+
+/**
+ * The main class responsible for preparing, chunking, styling and rendering
+ * content into paginated previews.
  *
- * Emits events:
- * - `page`: when a page is rendered
- * - `rendering`: when rendering starts
- * - `rendered`: when rendering finishes
- * - `size`: when page size is set
- * - `atpages`: when @page rules are processed
+ * Emits events: `page`, `rendering`, `rendered`, `size`, `atpages`.
  */
 class Previewer {
 	settings: Record<string, unknown>;
@@ -64,21 +135,19 @@ class Previewer {
 	handlers?: ReturnType<typeof initializeHandlers>;
 
 	/**
-	 * Create a new Previewer instance.
-	 * @param {Object} [options] - Optional configuration settings for rendering.
+	 * Creates a previewer. Constructing a previewer performs no DOM work and
+	 * no awaited work: the polisher's setup is deferred until `preview()`.
+	 * @param {Record<string, unknown>} [options] - Settings shared with the
+	 *   chunker; stored by reference.
 	 */
 	constructor(options?: Record<string, unknown>) {
 		this.settings = options || {};
-
 		this.polisher = new Polisher(false);
-
 		this.chunker = new Chunker(undefined, undefined, this.settings);
-
 		this.hooks = {
-			beforePreview: new Hook(this),
-			afterPreview: new Hook(this),
+			beforePreview: new Hook<[unknown, unknown]>(this),
+			afterPreview: new Hook<[Page[]]>(this),
 		};
-
 		this.size = {
 			width: {
 				value: 8.5,
@@ -92,28 +161,36 @@ class Previewer {
 			orientation: undefined,
 		};
 
+		// Forward the chunker's per-page event; the payload passes through
+		// unchanged.
 		this.chunker.on("page", (page) => {
 			this.emit("page", page);
 		});
 
+		// Forward the chunker's start-of-pagination event; the payload is the
+		// previewer's chunker instance. The chunker's own "rendered" event is
+		// deliberately not forwarded — the consumer-facing "rendered" event is
+		// emitted by preview() after the audit.
 		this.chunker.on("rendering", () => {
 			this.emit("rendering", this.chunker);
 		});
 	}
 
 	/**
-	 * Initializes handler modules (like footnotes, counters, etc.) and sets up relevant events.
-	 * @returns {Object} - The handler system that manages internal processing hooks.
+	 * Creates a fresh Handlers instance, instantiating every currently
+	 * registered handler class with `(chunker, polisher, previewer)`, and
+	 * bridges the handlers' `size` and `atpages` events onto this previewer.
+	 * @returns {ReturnType<typeof initializeHandlers>} The new Handlers instance.
 	 */
-	initializeHandlers() {
+	initializeHandlers(): ReturnType<typeof initializeHandlers> {
 		const handlers = initializeHandlers(this.chunker, this.polisher, this);
 
-		handlers.on("size", (size: Size) => {
+		handlers.on("size", (size) => {
 			this.size = size;
 			this.emit("size", size);
 		});
 
-		handlers.on("atpages", (pages: unknown[]) => {
+		handlers.on("atpages", (pages) => {
 			this.atpages = pages;
 			this.emit("atpages", pages);
 		});
@@ -122,152 +199,128 @@ class Previewer {
 	}
 
 	/**
-	 * Registers handlers with custom logic or extensions.
-	 * @returns {*} - The result of the registerHandlers function.
+	 * Adds handler classes to the shared, module-global handler registry, so
+	 * they are instantiated for every subsequent Handlers construction —
+	 * including other previewer instances.
+	 * @param {...typeof Handler} args - Handler classes to register.
 	 */
-	registerHandlers(...args: Array<typeof Handler>) {
-		return registerHandlers.apply(registerHandlers, args as never);
+	registerHandlers(...args: Array<typeof Handler>): void {
+		registerHandlers.apply(registerHandlers, args);
 	}
 
 	/**
-	 * Retrieve a query parameter from the current URL.
-	 * @param {string} name - Name of the parameter.
-	 * @returns {string | undefined} - Parameter value if found.
+	 * Reads a query parameter from the current page URL. For a duplicated
+	 * parameter the last occurrence wins; values are URL-decoded.
+	 * @param {string} name - Parameter name to look up.
+	 * @returns {string | undefined} The last matching value, or `undefined`
+	 *   when the parameter does not appear.
 	 */
 	getParams(name: string): string | undefined {
-		let param;
-		const url = new URL(window.location as unknown as URL);
-		const params = new URLSearchParams(url.search);
-		for (const pair of params.entries()) {
-			if (pair[0] === name) {
-				param = pair[1];
+		const params = new URLSearchParams(window.location.search);
+		let value: string | undefined = undefined;
+
+		for (const [key, paramValue] of params) {
+			if (key === name) {
+				value = paramValue;
 			}
 		}
-		return param;
+
+		return value;
 	}
 
 	/**
-	 * Wraps the contents of the `<body>` in a `<template>` element if not already present.
-	 * This is used to preserve the original content for chunking and layout.
-	 *
-	 * @returns {DocumentFragment} - The wrapped content.
+	 * Moves the body's content into an inert `<template data-ref="paged-content">`
+	 * and returns its fragment. Idempotent: once the template exists, its
+	 * content is returned and the body is left untouched.
+	 * @returns {DocumentFragment} The wrapped content fragment.
 	 */
 	wrapContent(): DocumentFragment {
 		const body = document.querySelector("body")!;
-		let template = body.querySelector(
+		const existing = body.querySelector(
 			":scope > template[data-ref='paged-content']",
-		);
+		) as HTMLTemplateElement | null;
 
-		if (!template) {
-			template = document.createElement("template");
-			template.dataset.ref = "paged-content";
-			template.innerHTML = body.innerHTML;
-			body.innerHTML = "";
-			body.appendChild(template);
+		if (existing) {
+			return existing.content;
 		}
 
-		return (template as HTMLTemplateElement).content;
+		const template = document.createElement("template");
+		template.dataset.ref = "paged-content";
+		template.innerHTML = body.innerHTML;
+		body.innerHTML = "";
+		body.appendChild(template);
+
+		return template.content;
 	}
 
 	/**
-	 * Removes stylesheets and inline `<style>` elements that should not be processed.
-	 * Also returns the list of removed styles for reprocessing later.
-	 *
-	 * @param {Document} [doc=document] - The document to process styles from.
-	 * @returns {Array} - Array of stylesheet hrefs or inline style objects.
+	 * Harvests the document's stylesheets (author `<style>` elements and
+	 * stylesheet `<link>`s, excluding screen-media, `data-paged-ignore` and
+	 * `data-paged-inserted-styles` ones), removing each element from the DOM.
+	 * @param {Document} [doc] - Document to harvest from; defaults to the
+	 *   current document.
+	 * @returns {Array<string | Record<string, string> | undefined>} The
+	 *   harvested stylesheet list in document order.
 	 */
-	removeStyles(
-		doc: Document = document,
-	): Array<string | Record<string, string> | undefined> {
-		const stylesheets = Array.from(
-			doc.querySelectorAll(
-				"link[rel='stylesheet']:not([data-paged-ignore], [media~='screen'])",
-			),
+	removeStyles(doc: Document = document): Array<string | Record<string, string> | undefined> {
+		const styleSheets = doc.querySelectorAll(
+			"link[rel='stylesheet']:not([data-paged-ignore], [media~='screen'])",
 		);
-		const inlineStyles = Array.from(
-			doc.querySelectorAll(
-				"style:not([data-paged-inserted-styles], [data-paged-ignore], [media~='screen'])",
-			),
+		const inlineStyles = doc.querySelectorAll(
+			"style:not([data-paged-inserted-styles], [data-paged-ignore], [media~='screen'])",
 		);
-		const elements = [...stylesheets, ...inlineStyles];
 
-		return elements
-			.sort((a, b) => {
-				const position = a.compareDocumentPosition(b);
-				if (position === Node.DOCUMENT_POSITION_PRECEDING) return 1;
-				if (position === Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-				return 0;
-			})
-			.map((element) => {
-				if (element.nodeName === "STYLE") {
-					const obj: Record<string, string> = {};
-					obj[window.location.href] = element.textContent!;
-					element.remove();
-					return obj;
-				}
-				if (element.nodeName === "LINK") {
-					element.remove();
-					return (element as HTMLLinkElement).href;
-				}
-				console.warn(`Unable to process: ${element}, ignoring.`);
-			});
+		const stylesheets: Element[] = [...styleSheets, ...inlineStyles];
+
+		stylesheets.sort(documentPositionComparator);
+
+		return stylesheets.map(harvestStylesheet);
 	}
 
 	/**
-	 * Harvests stylesheets embedded in the content itself — `<style>`
-	 * elements and stylesheet `<link>`s that live inside the body/fragment
-	 * rather than the document head.
-	 *
-	 * Manual `Previewer` callers typically pass a fragment whose CSS is
-	 * embedded in it (demos, editable previews). Without harvesting, that
-	 * CSS never reaches the polisher: handlers never see the declarations
-	 * (page floats go untagged, `@page` rules stay dead) and the raw rules
-	 * apply globally once rendered. The elements are removed from the
-	 * content and returned for polisher processing.
-	 *
-	 * @param {DocumentFragment|HTMLElement} content - The content to harvest from.
-	 * @returns {Array} - Stylesheet hrefs / inline style objects, in document order.
+	 * Harvests stylesheets embedded in the content root (`<style>` elements
+	 * and stylesheet `<link>`s living in the body/fragment), removing each
+	 * element from the content. Needed for manual callers that pass fragments
+	 * with embedded CSS — without it handlers never see those declarations.
+	 * @param {DocumentFragment | HTMLElement | string | null} [content] -
+	 *   Content root to harvest from; falsy values and strings yield `[]`.
+	 * @returns {Array<string | Record<string, string> | undefined>} The
+	 *   harvested stylesheet list in document order.
 	 */
 	removeContentStyles(
 		content?: DocumentFragment | HTMLElement | string | null,
 	): Array<string | Record<string, string> | undefined> {
-		const root = content as ParentNode;
-		if (!root || typeof root.querySelectorAll !== "function") {
+		if (!content || typeof (content as HTMLElement).querySelectorAll !== "function") {
 			return [];
 		}
-		const elements = Array.from(
-			root.querySelectorAll(
-				"style:not([data-paged-inserted-styles], [data-paged-ignore], [media~='screen']), " +
-					"link[rel='stylesheet']:not([data-paged-ignore], [media~='screen'])",
+
+		const root = content as DocumentFragment | HTMLElement;
+
+		const stylesheets: Element[] = [
+			...root.querySelectorAll(
+				"style:not([data-paged-inserted-styles], [data-paged-ignore], [media~='screen']), link[rel='stylesheet']:not([data-paged-ignore], [media~='screen'])",
 			),
-		);
-		return elements
-			.sort((a, b) => {
-				const position = a.compareDocumentPosition(b);
-				if (position === Node.DOCUMENT_POSITION_PRECEDING) return 1;
-				if (position === Node.DOCUMENT_POSITION_FOLLOWING) return -1;
-				return 0;
-			})
-			.map((element) => {
-				if (element.nodeName === "STYLE") {
-					const obj: Record<string, string> = {};
-					obj[window.location.href] = element.textContent!;
-					element.remove();
-					return obj;
-				}
-				element.remove();
-				return (element as HTMLLinkElement).href;
-			});
+		];
+
+		stylesheets.sort(documentPositionComparator);
+
+		return stylesheets.map(harvestStylesheet);
 	}
 
 	/**
-	 * Main method for rendering content into paginated preview.
-	 * Triggers hooks and events, applies stylesheets, chunks the content, and returns the flow result.
-	 *
-	 * @param {HTMLElement|DocumentFragment|string} [content] - The content to render.
-	 * @param {Array<string|Object>} [stylesheets] - List of stylesheet hrefs or inline styles to apply.
-	 * @param {HTMLElement|string} [renderTo] - Element or selector where rendered content will be inserted.
-	 * @returns {Promise<Object>} - Resolves to the rendered flow object with performance and size metadata.
+	 * Runs the full pipeline: CSS harvesting and processing, handler
+	 * instantiation, pagination, post-render balancing, image settling and the
+	 * render audit. The returned object is the chunker itself, mutated in
+	 * place with `pages`, `performance`, `size`, `overflowViolations` and
+	 * `warnings`.
+	 * @param {HTMLElement | DocumentFragment | string} [content] - Content to
+	 *   paginate; falsy content (including the empty string) wraps the body.
+	 * @param {Array<string | Record<string, string> | undefined>} [stylesheets] -
+	 *   Explicit stylesheet list; `undefined`/`null` harvests the document's
+	 *   styles instead, an empty array suppresses harvesting.
+	 * @param {HTMLElement | string} [renderTo] - Render target for the pages
+	 *   area (honored on the first flow only).
+	 * @returns {Promise<FlowResult>} The augmented chunker.
 	 */
 	async preview(
 		content?: HTMLElement | DocumentFragment | string,
@@ -276,85 +329,99 @@ class Previewer {
 	): Promise<FlowResult> {
 		await this.hooks.beforePreview.trigger(content, renderTo);
 
-		let flowContent = content;
-		let flowStylesheets = stylesheets;
+		let flowContent: HTMLElement | DocumentFragment | string;
 
-		if (!flowContent) {
+		if (content) {
+			flowContent = content;
+		} else {
 			flowContent = this.wrapContent();
 		}
 
-		let docStylesheets: Array<string | Record<string, string> | undefined> =
-			[];
-		if (flowStylesheets === undefined || flowStylesheets === null) {
+		let docStylesheets: Array<string | Record<string, string> | undefined> = [];
+
+		if (stylesheets === undefined || stylesheets === null) {
 			docStylesheets = this.removeStyles();
 		}
 
-		// Content-embedded styles are harvested wherever the content came
-		// from and processed last (they originate latest in source order).
 		const contentStylesheets = this.removeContentStyles(flowContent);
 
-		flowStylesheets = [...docStylesheets, ...(flowStylesheets ?? []), ...contentStylesheets];
+		// Document styles first, then the caller-supplied list, then
+		// content-embedded styles last (they originate latest in source order).
+		const flowStylesheets = [
+			...docStylesheets,
+			...(stylesheets ?? []),
+			...contentStylesheets,
+		];
 
+		// Base CSS must be in place before handlers are constructed.
 		this.polisher.setup();
+
 		this.handlers = this.initializeHandlers();
 
+		// During this awaited phase the handlers run; `@page size` resolution
+		// surfaces as the "size" event and collected `@page` rules as the
+		// "atpages" event (both stored on the instance and re-emitted).
 		await this.polisher.add(
 			...(flowStylesheets as Array<string | Record<string, string>>),
 		);
 
 		const startTime = performance.now();
 
-		const flow = (await this.chunker.flow(
+		const flow = await this.chunker.flow(
 			flowContent,
 			renderTo as HTMLElement,
-		)) as FlowResult;
+		) as FlowResult;
 
 		const endTime = performance.now();
 
-		// Release height constraints on final multicol fragments so their
-		// columns balance (column-fill: balance behavior on last pages).
+		// Release the forced height/fill constraints on final multicol
+		// fragments and on root-level manual-column rows that end early, so
+		// their columns balance like `column-fill: balance` on the last page.
 		rebalanceMulticolFinals(this.chunker.pagesArea);
 		rebalanceManualColumnFinals(this.chunker.pagesArea);
 
-		// Let every image finish loading and layout before auditing: a float
-		// figure whose image completes after its page was filled changes the
-		// column heights, and auditing against the in-flight geometry would
-		// report spills that no longer exist (or miss live ones).
+		// Image settling: wait for every image in the rendered pages to load
+		// or fail, then give the browser one layout pass before auditing —
+		// a late-loading image changes column heights, and auditing against
+		// in-flight geometry would report spills that no longer exist (or miss
+		// live ones).
+		const images = (this.chunker.pagesArea || document).querySelectorAll("img");
+
 		await Promise.all(
-			Array.from(
-				(this.chunker.pagesArea || document).querySelectorAll("img"),
-			).map((img) =>
-				img.complete
-					? Promise.resolve()
-					: new Promise<void>((resolve) => {
-							img.addEventListener("load", () => resolve(), { once: true });
-							img.addEventListener("error", () => resolve(), { once: true });
-						}),
-			),
+			Array.from(images).map((image) => {
+				return new Promise((resolve) => {
+					if (image.complete) {
+						resolve(null);
+						return;
+					}
+
+					image.addEventListener("load", () => resolve(null), { once: true });
+					image.addEventListener("error", () => resolve(null), { once: true });
+				});
+			}),
 		);
-		// One frame for the browser to lay out the settled images.
-		await new Promise((resolve) => requestAnimationFrame(resolve));
+
+		await new Promise((resolve) => {
+			requestAnimationFrame(resolve);
+		});
 
 		flow.performance = endTime - startTime;
 		flow.size = this.size;
 
 		flow.overflowViolations = validateRenderedPages(this.chunker.pagesArea);
+
 		if (flow.overflowViolations.length) {
 			console.warn(
-				`paged-with-floats: ${flow.overflowViolations.length} page(s) contain ` +
-					"content outside its designated space",
+				`paged-with-floats: ${flow.overflowViolations.length} page(s) contain content outside its designated space`,
 				flow.overflowViolations.slice(0, 5),
 			);
 		}
 
-		// Non-fatal notices: sub-tolerance margin protrusions and words
-		// hyphenated at break points. Returned to the client, which can
-		// ignore them or act on them; only a summary goes to the console.
 		flow.warnings = collectRenderWarnings(this.chunker.pagesArea);
+
 		if (flow.warnings.length) {
 			console.warn(
-				`paged-with-floats: ${flow.warnings.length} rendering warning(s) ` +
-					"(available on flow.warnings)",
+				`paged-with-floats: ${flow.warnings.length} rendering warning(s) (available on flow.warnings)`,
 			);
 		}
 
@@ -368,7 +435,8 @@ class Previewer {
 
 interface Previewer extends PagedEventEmitter {}
 
-// Add event emitter behavior to the Previewer prototype
+// Mix the event-emitter methods (on, once, off, emit) into the prototype so
+// every previewer instance is an event hub.
 EventEmitter(Previewer.prototype);
 
 export default Previewer;

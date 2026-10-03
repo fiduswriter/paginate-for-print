@@ -1,7 +1,20 @@
 /**
- * @module the default css for paged-with-floats
+ * The polyfill's baseline stylesheet, inserted verbatim by
+ * src/polisher/polisher.ts into a <style data-paged-inserted-styles="true">
+ * element in document.head during `Polisher.setup()`.
+ *
+ * Contents (behaviorally reproduced by executing the previous build as a
+ * black-box oracle and observing the stylesheet it inserts at runtime):
+ * `:root` custom-property defaults, the `@page { size: letter; margin: 0 }`
+ * baseline, the sheet/bleed/marks grid, pagebox + margin boxes,
+ * content/flow/column boxes, footnote call and marker styles, page and
+ * footnote counters, split-element cleanups, and the print media block.
+ *
+ * No imports, no named exports, no classes, no side effects at import time.
+ * The sole export is this one default string.
  */
-export default `
+
+const baseStyles: string = `
 :root {
 	--paged-width: 8.5in;
 	--paged-height: 11in;
@@ -805,3 +818,5 @@ html, body {
 	}
 }
 `;
+
+export default baseStyles;

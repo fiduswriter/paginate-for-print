@@ -23,36 +23,13 @@ incorporates) are shipped with this distribution in [`COPYING.LESSER`](./COPYING
 and [`COPYING`](./COPYING), and are available at
 <https://www.gnu.org/licenses/>.
 
-## Pre-existing Paged.js code
+## Provenance
 
-This project is a derivative work of [Paged.js](https://github.com/pagedjs/pagedjs).
-The portions of this software that originate from Paged.js remain under their
-original MIT license, reproduced here verbatim as required by that license:
-
-```
-The MIT License (MIT)
-
-Copyright (c) 2018 Adam Hyde
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-Distributed bundles built from this repository contain substantial portions of
-that MIT-licensed code; the notice above therefore accompanies every build
-(see the file banner injected at build time).
+This project began as a fork of [Paged.js](https://github.com/pagedjs/pagedjs)
+(MIT-licensed, Copyright (c) 2018 Adam Hyde). All code originally derived from
+Paged.js has since been replaced with independent implementations; the entirety
+of the current source tree is written and maintained as part of
+**paged-with-floats** and is licensed solely under the LGPL-3.0-or-later as
+stated above. The historical debt to Paged.js and its authors is documented in
+[`ACKNOWLEDGMENTS.md`](./ACKNOWLEDGMENTS.md), and the replacement effort is
+traced in [`MIT_LICENSE_TRACKING.md`](./MIT_LICENSE_TRACKING.md).

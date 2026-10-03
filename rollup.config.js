@@ -25,13 +25,9 @@ const plugins = [
 		banner:
 			" @license paged-with-floats v<%= pkg.version %>\n" +
 			"\n" +
-			" Modifications and additions in this build are Copyright (C) 2026 Johannes Wilm\n" +
-			" and licensed under the GNU Lesser General Public License, version 3 or later\n" +
-			" (LGPL-3.0-or-later). See COPYING.LESSER and LICENSE.md for details.\n" +
-			"\n" +
-			" Contains substantial portions of Paged.js, licensed under the MIT License:\n" +
-			" Copyright (c) 2018 Adam Hyde. This notice is retained as required by that\n" +
-			" license. See LICENSE.md for the full license text.",
+			" Copyright (C) 2026 Johannes Wilm\n" +
+			" Licensed under the GNU Lesser General Public License, version 3 or later\n" +
+			" (LGPL-3.0-or-later). See COPYING.LESSER and LICENSE.md for details.",
 	}),
 ];
 

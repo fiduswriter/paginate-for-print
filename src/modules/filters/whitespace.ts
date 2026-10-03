@@ -1,105 +1,120 @@
 import Handler from "../handler.js";
 import type { HandlerSource } from "../handler.js";
 import {
+	filterTree,
 	isElement,
 	isIgnorable,
 	nextSignificantNode,
-	previousSignificantNode,
-	filterTree,
+	previousSignificantNode
 } from "../../utils/dom.js";
 
 /**
- * Filters and normalizes whitespace-only text nodes that are not visually meaningful.
+ * Single space used to replace a collapsed whitespace run.
+ */
+const singleSpace = " ";
+
+/**
+ * Handler that cleans whitespace-only text nodes out of the parsed content
+ * before pagination starts.
  *
- * Removes or replaces ignorable text nodes (e.g., extra line breaks, tabs, or spaces)
- * except in contexts where whitespace is meaningful (e.g., inside `<pre>` tags).
+ * The class member named `filter` is auto-registered (by the base Handler
+ * constructor) onto the chunker's `filter` hook, which is triggered
+ * synchronously on the parsed content fragment after `beforeParsed` and
+ * before `afterParsed`.
  *
- * @class
- * @extends Handler
+ * A whitespace-only text node (TAB/LF/CR/SPACE characters only, longer than
+ * one character) is either deleted or collapsed to a single space:
+ *
+ * - Inside a `<pre>` subtree (detected structurally via the parent's
+ *   `closest("pre")`, never via computed `white-space` style) it is
+ *   preserved verbatim.
+ * - Whitespace runs with significant content on BOTH sides (skipping
+ *   comments and other whitespace text nodes, without climbing) collapse to
+ *   exactly one space — the interior case.
+ * - Runs with significant content on at most one side (leading/trailing
+ *   runs) are removed outright — the edge case.
+ * - One-character runs, empty text nodes and text containing any other
+ *   character (NBSP, form feed, vertical tab, real text) are never touched.
+ *
+ * Adjacent whitespace runs are decided independently and each collapses to
+ * its own single-space node; merging them is left to CSS whitespace
+ * processing in the browser.
+ *
+ * Known limitation (kept intentionally to stay behavior-identical):
+ * sequences of whitespace should also be preserved when the parent element
+ * has a CSS `white-space` value of `pre`, `pre-wrap` or `break-spaces`
+ * (sequences preserved) or `pre-line` (sequences collapsed, newlines
+ * preserved). Honor that by inspecting the parent's computed style.
  */
 class WhiteSpaceFilter extends Handler {
-	/**
-	 * Create a WhiteSpaceFilter instance.
-	 *
-	 * @param {Object} chunker - Handles document chunking.
-	 * @param {Object} polisher - Handles CSS polishing/styling.
-	 * @param {Object} caller - The invoking processor or engine.
-	 */
 	constructor(chunker?: HandlerSource, polisher?: HandlerSource, caller?: HandlerSource) {
 		super(chunker, polisher, caller);
 	}
 
 	/**
-	 * Filters out or normalizes ignorable whitespace-only text nodes from content.
-	 *
-	 * @param {DocumentFragment | HTMLElement} content - The DOM content to filter.
+	 * Removes or collapses every whitespace-only text node in the subtree
+	 * rooted at `content` (excluding `content` itself, which a TreeWalker
+	 * never yields). Mutates the tree in place.
+	 * @param {DocumentFragment | HTMLElement} content - The parsed content
+	 * fragment (or an element) to clean.
+	 * @returns {void} Nothing; the tree is mutated in place.
 	 */
-	filter(content: DocumentFragment | HTMLElement) {
-		filterTree(
-			content,
-			(node) => {
-				return this.filterEmpty(node as Text);
-			},
-			NodeFilter.SHOW_TEXT,
-		);
+	filter(content: DocumentFragment | HTMLElement): void {
+		filterTree(content, (node: Node) => {
+			return this.filterEmpty(node as Text);
+		}, NodeFilter.SHOW_TEXT);
 	}
 
 	/**
-	 * Determines whether a text node should be removed or normalized.
-	 * Replaces content with a single space if it's between significant siblings,
-	 * and removes the node if it's safe to do so.
+	 * Decides the fate of a single text node, optionally mutating it.
 	 *
-	 * @param {Text} node - The text node to evaluate.
-	 * @returns {number} A NodeFilter constant indicating filter behavior.
+	 * Returns `NodeFilter.FILTER_ACCEPT` when the node should be removed
+	 * from its parent, `NodeFilter.FILTER_REJECT` when it should survive
+	 * (possibly rewritten to a single space). Never mutates a node that
+	 * fails the eligibility gate or sits inside a `<pre>` subtree.
+	 * @param {Text} node - Text node to decide on.
+	 * @returns {number} `NodeFilter.FILTER_ACCEPT` (1) to remove the node,
+	 * `NodeFilter.FILTER_REJECT` (2) to keep it.
 	 */
 	filterEmpty(node: Text): number {
-		if (node.textContent!.length > 1 && isIgnorable(node)) {
-			const parent = node.parentNode;
-			const pre = isElement(parent) && parent!.closest("pre");
-
-			// Skip if inside <pre> or similar white-space preserving context
-			if (pre) {
-				return NodeFilter.FILTER_REJECT;
-			}
-
-			const previousSibling = previousSignificantNode(node);
-			const nextSibling = nextSignificantNode(node);
-
-			if (nextSibling === null && previousSibling === null) {
-				// Only node — keep it, but normalize to a single space
-				node.textContent = " ";
-				return NodeFilter.FILTER_REJECT;
-			}
-
-			if (nextSibling === null || previousSibling === null) {
-				// Safe to remove
-				return NodeFilter.FILTER_ACCEPT;
-			}
-
-			// Normalize to a single space
-			node.textContent = " ";
+		// Eligibility gate: only runs of more than one character, made up
+		// exclusively of TAB, LF, CR and SPACE, are candidates.
+		const content = node.textContent;
+		if (!content || content.length <= 1 || !isIgnorable(node)) {
 			return NodeFilter.FILTER_REJECT;
 		}
 
+		// Pre preservation: check the DOM structure through the immediate
+		// parent, not CSS computed styles (see the documented limitation).
+		const parent = node.parentNode;
+		if (isElement(parent) && parent.closest("pre")) {
+			return NodeFilter.FILTER_REJECT;
+		}
+
+		// Significant-sibling scan: comments and other whitespace-only text
+		// nodes are invisible to this decision; the scans never climb past
+		// the parent nor descend into element children.
+		const prev = previousSignificantNode(node);
+		const next = nextSignificantNode(node);
+
+		if (!prev && !next) {
+			// Nothing significant besides this node: collapse to one space
+			// but keep the node.
+			node.textContent = singleSpace;
+			return NodeFilter.FILTER_REJECT;
+		}
+
+		if (!prev || !next) {
+			// The run touches one edge of the parent's significant content:
+			// remove it entirely, without leaving a space behind.
+			return NodeFilter.FILTER_ACCEPT;
+		}
+
+		// Interior run between two significant siblings: collapse to one
+		// space and keep the node.
+		node.textContent = singleSpace;
 		return NodeFilter.FILTER_REJECT;
 	}
 }
 
 export default WhiteSpaceFilter;
-
-// TODO: we also need to preserve sequences of white spaces when the parent has "white-space" rule:
-// pre Sequences of white space are preserved. Lines are only broken at newline characters in the source and at <br> elements.
-//
-// pre-wrap
-// Sequences of white space are preserved. Lines are broken at newline characters, at <br>, and as necessary to fill line boxes.
-//
-// pre-line
-// Sequences of white space are collapsed. Lines are broken at newline characters, at <br>, and as necessary to fill line boxes.
-//
-// break-spaces
-// The behavior is identical to that of pre-wrap, except that:
-// - Any sequence of preserved white space always takes up space, including at the end of the line.
-// - A line breaking opportunity exists after every preserved white space character, including between white space characters.
-// - Such preserved spaces take up space and do not hang, and thus affect the box’s intrinsic sizes (min-content size and max-content size).
-//
-// See: https://developer.mozilla.org/en-US/docs/Web/CSS/white-space#Values

@@ -3,29 +3,34 @@ import type { HandlerSource } from "../handler.js";
 import { filterTree } from "../../utils/dom.js";
 
 /**
- * Handler that filters out HTML comment nodes from the content.
+ * Handler that removes every HTML comment node from the parsed content
+ * before pagination starts.
  *
- * @class
- * @extends Handler
+ * The class member named `filter` is auto-registered (by the base Handler
+ * constructor) onto the chunker's `filter` hook, which is triggered
+ * synchronously on the parsed content fragment after parsing and before
+ * `afterParsed`. No comment text ever reaches a page.
+ *
+ * The filter is unconditional: every comment node in the subtree is deleted,
+ * regardless of its content (ordinary comments, IE conditional comments,
+ * `<?php ... ?>`-style constructs that browsers parse as comments). Nothing
+ * else is touched: elements that held only comments survive as empty
+ * elements, and surrounding text/whitespace is left for the other filters.
  */
 class CommentsFilter extends Handler {
-	/**
-	 * Create a CommentsFilter instance.
-	 *
-	 * @param {Object} chunker - The chunker responsible for managing document chunks.
-	 * @param {Object} polisher - The polisher responsible for post-processing or styling.
-	 * @param {Object} caller - The main object calling the handler (likely the flow controller).
-	 */
 	constructor(chunker?: HandlerSource, polisher?: HandlerSource, caller?: HandlerSource) {
 		super(chunker, polisher, caller);
 	}
 
 	/**
-	 * Removes comment nodes from the provided content.
-	 *
-	 * @param {DocumentFragment | HTMLElement} content - The DOM content to be filtered.
+	 * Removes every comment node from the subtree rooted at `content`
+	 * (excluding `content` itself, which a TreeWalker never yields).
+	 * Mutates the tree in place; returns undefined.
+	 * @param {DocumentFragment | HTMLElement} content - The parsed content
+	 * fragment (or an element) to strip of comment nodes.
+	 * @returns {void} Nothing; the tree is mutated in place.
 	 */
-	filter(content: DocumentFragment | HTMLElement) {
+	filter(content: DocumentFragment | HTMLElement): void {
 		filterTree(content, null, NodeFilter.SHOW_COMMENT);
 	}
 }

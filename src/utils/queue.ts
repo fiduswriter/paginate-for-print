@@ -1,5 +1,6 @@
 import { defer } from "./utils.js";
 
+// Internal (non-exported) queue-item model.
 type QueuedTask = (...args: any[]) => unknown;
 
 interface QueuedItemTask {
@@ -17,15 +18,21 @@ interface QueuedItemPromise {
 }
 
 type QueueItem = QueuedItemTask | QueuedItemPromise;
+
+// Module-private constant (fallback interval when animation frames are not being produced).
+const TICK_FALLBACK_MS: number = 100;
+
 /**
- * Queue for handling tasks one at a time
+ * Serial task queue paced by animation frames, with a timer fallback so
+ * pagination keeps progressing when the browser stops producing frames
+ * (e.g. for an occluded or minimized preview window).
+ *
+ * Tasks are executed strictly FIFO, one at a time; each step is started on
+ * a fresh scheduler tick (animation frame or, at the latest, the fallback
+ * timer). Promise values may be enqueued as well; they are passed through
+ * untouched and only gate the drain.
  */
-
-/** Fallback interval when animation frames are not being produced. */
-const TICK_FALLBACK_MS = 100;
-
 class Queue {
-
 	_q: QueueItem[];
 	context: unknown;
 	tick: (cb: () => void) => number;
@@ -33,140 +40,131 @@ class Queue {
 	paused: boolean;
 	defered!: defer;
 
+	/**
+	 * @param {unknown} context - The `this` value passed to every task
+	 *   invocation, exactly as given (never defaulted or wrapped).
+	 */
 	constructor(context: unknown) {
-		this._q = [];
 		this.context = context;
-		this.tick = this.scheduleTick;
+		this._q = [];
+		this.tick = this.scheduleTick.bind(this);
 		this.running = false;
 		this.paused = false;
 	}
 
 	/**
-	 * Schedules a callback on the next animation frame, with a timer
-	 * fallback for environments that stop producing frames.
+	 * The default tick scheduler: invokes `cb` at most once, via whichever
+	 * of an animation frame or a fallback timer (TICK_FALLBACK_MS) arrives
+	 * first. The animation frame is requested first; the fallback timer is
+	 * created right after. The animation-frame request is never cancelled,
+	 * and the first signal to fire clears the fallback timer (which may not
+	 * exist yet when the frame signal wins synchronously). Returns the
+	 * animation-frame handle only.
 	 *
-	 * Occluded or minimized windows pause requestAnimationFrame
-	 * indefinitely; without the fallback, pagination would stall forever
-	 * whenever the preview is not actually on screen. Whichever signal
-	 * arrives first wins; the other is cancelled.
-	 *
-	 * @param {Function} cb - The callback to schedule.
-	 * @returns {number} The animation frame handle.
+	 * @param {() => void} cb - The callback to invoke on the next tick.
+	 * @returns {number} The animation-frame request handle.
 	 */
 	private scheduleTick(cb: () => void): number {
 		let fired = false;
-		const once = () => {
+		let timeout: number | undefined;
+		const tickCallback = () => {
 			if (fired) {
 				return;
 			}
 			fired = true;
-			window.clearTimeout(fallback);
+			window.clearTimeout(timeout);
 			cb();
 		};
-		const handle = requestAnimationFrame.call(window, once);
-		const fallback = window.setTimeout(once, TICK_FALLBACK_MS);
-		return handle;
+		const frame = requestAnimationFrame.call(window, tickCallback);
+		timeout = window.setTimeout(tickCallback, TICK_FALLBACK_MS);
+		return frame;
 	}
+
 	/**
-	 * Add an item to the queue
+	 * Append a task (or promise) to the queue and auto-start the drain loop
+	 * when the queue is idle and not paused.
 	 *
-	 * @return {Promise} enqueued
+	 * @param {QueuedTask | Promise<unknown>} [task] - A function to invoke,
+	 *   or any truthy non-function value (typically a promise) to pass
+	 *   through as a promise item.
+	 * @param {any[]} args - Arguments passed to the task invocation.
+	 * @returns {Promise<unknown>} For a function task, the promise that
+	 *   settles when the task completes; otherwise the exact value passed in.
 	 */
 	enqueue(
 		task?: QueuedTask | Promise<unknown>,
 		...args: any[]
 	): Promise<unknown> {
-		let deferred: defer;
-		let promise: Promise<unknown> | undefined;
-		let queued: QueueItem;
-
 		if (!task) {
 			throw new Error("No Task Provided");
 		}
 
+		let item: QueueItem;
+		let promise: Promise<unknown>;
 		if (typeof task === "function") {
-			deferred = new defer();
+			const deferred = new defer();
+			item = { task, args, deferred, promise: deferred.promise };
 			promise = deferred.promise;
-
-			queued = {
-				task,
-				args,
-				deferred,
-				promise,
-			};
 		} else {
-			// Task is a promise
-			queued = {
-				promise: task,
-			};
+			item = { promise: task };
+			promise = task;
 		}
 
-		this._q.push(queued);
+		this._q.push(item);
 
-		// Wait to start queue flush
-		if (this.paused == false && !this.running) {
+		if (!this.paused && !this.running) {
 			this.run();
 		}
 
-		return queued.promise!;
+		return promise;
 	}
 
 	/**
-	 * Run one item
+	 * Take the head item, if any, and start it. Task rejections are
+	 * contained: they settle the enqueue promise but never reject the
+	 * promise returned here.
 	 *
-	 * @return {Promise} dequeued
+	 * @returns {Promise<unknown>} The promise of the started item (a fresh
+	 *   already-resolved promise when the queue is empty or paused).
 	 */
 	dequeue(): Promise<unknown> {
-		let inwait: QueueItem;
-
 		if (this._q.length && !this.paused) {
-			inwait = this._q.shift()!;
-			const task = inwait.task;
-			if (task) {
-				const result = task.apply(this.context, inwait.args);
-
-				if (result && typeof (result as Promise<unknown>).then === "function") {
-					// Task is a function that returns a promise
-					const deferredTask = (inwait as QueuedItemTask).deferred;
+			const item = this._q.shift() as QueueItem;
+			if (typeof item.task === "function") {
+				const result: any = item.task.apply(this.context, item.args);
+				if (result && typeof result.then === "function") {
 					return (result as Promise<unknown>).then(
-						function (this: Queue) {
-							deferredTask.resolve.apply(this.context, arguments as any);
-						}.bind(this),
-						function (this: Queue) {
-							deferredTask.reject.apply(this.context, arguments as any);
-						}.bind(this),
+						(value: unknown) => {
+							item.deferred.resolve(value);
+						},
+						(reason: unknown) => {
+							item.deferred.reject(reason);
+						},
 					);
-				} else {
-					// Task resolves immediately
-					(inwait as QueuedItemTask).deferred.resolve.apply(
-						this.context,
-						result as any,
-					);
-					return inwait.promise;
 				}
-			} else if (inwait.promise) {
-				// Task is a promise
-				return inwait.promise;
+				// Synchronous completion: resolve the deferred with the
+				// result applied as an argument list (arrays resolve with
+				// their first element; non-array-like objects and null
+				// resolve undefined; other primitives throw a TypeError
+				// synchronously out of this method).
+				item.deferred.resolve.apply(undefined, result as any);
+				return item.promise;
 			}
+			return item.promise;
 		}
-
-		const settled = new defer();
-		settled.resolve();
-		return settled.promise;
+		return Promise.resolve();
 	}
 
-	// Run All Immediately
+	// Synchronous drain of every pending item. Does not touch `running` or
+	// `paused`. HAZARD: loops forever when paused with pending items.
 	dump(): void {
 		while (this._q.length) {
 			this.dequeue();
 		}
 	}
 
-	/**
-	 * Run all tasks sequentially, at convenience
-	 *
-	 * @return {Promise} all run
-	 */
+	// Frame-paced sequential drain; resolves when the queue empties.
+	// Calling run() unpauses the queue.
 	run(): Promise<unknown> {
 		if (!this.running) {
 			this.running = true;
@@ -175,75 +173,54 @@ class Queue {
 
 		this.tick.call(window, () => {
 			if (this._q.length) {
-				this.dequeue().then(
-					function (this: Queue) {
-						this.run();
-					}.bind(this),
-				);
+				this.dequeue().then(() => {
+					this.run();
+				});
 			} else {
 				this.defered.resolve();
 				this.running = undefined;
 			}
 		});
 
-		// Unpause
-		if (this.paused == true) {
+		if (this.paused) {
 			this.paused = false;
 		}
 
 		return this.defered.promise;
 	}
 
-	/**
-	 * Flush all, as quickly as possible
-	 *
-	 * @return {Promise} ran
-	 */
+	// Microtask-paced drain; fastest possible processing. Returns the
+	// active cycle state when busy (the literal boolean `true` during a
+	// run cycle), a chain promise when draining, or undefined when idle
+	// and empty.
 	flush(): Promise<unknown> | undefined {
 		if (this.running) {
 			return this.running as Promise<unknown>;
 		}
 
 		if (this._q.length) {
-			this.running = this.dequeue().then(
-				function (this: Queue) {
-					this.running = undefined;
-					return this.flush();
-				}.bind(this),
-			);
-
-			return this.running;
+			this.running = this.dequeue().then(() => {
+				this.running = undefined;
+				return this.flush();
+			});
+			return this.running as Promise<unknown>;
 		}
 
-		return;
+		return undefined;
 	}
 
-	/**
-	 * Clear all items in wait
-	 */
 	clear(): void {
 		this._q = [];
 	}
 
-	/**
-	 * Get the number of tasks in the queue
-	 *
-	 * @return {number} tasks
-	 */
 	length(): number {
 		return this._q.length;
 	}
 
-	/**
-	 * Pause a running queue
-	 */
 	pause(): void {
 		this.paused = true;
 	}
 
-	/**
-	 * End the queue
-	 */
 	stop(): void {
 		this._q = [];
 		this.running = false;
@@ -252,34 +229,34 @@ class Queue {
 }
 
 /**
- * Create a new task from a callback
+ * Adapt a Node-style last-argument-callback function into a
+ * promise-returning wrapper. Calling Task does not run `task`; the
+ * returned wrapper invokes it with the wrapper's own arguments followed
+ * by a callback whose `(value, err)` pair decides resolution/rejection.
  *
- * @param {function} task - Task to complete.
- * @param {any[]} [args] - Arguments for the task.
- * @param {unknown} [context] - Scope of the task.
- * @returns {function} A function returning a promise that resolves via a Node-style callback appended to the arguments.
+ * @param {(...args: any[]) => void} task - The function to wrap.
+ * @param {any[]} args - Dead parameter, kept for signature compatibility;
+ *   never used.
+ * @param {unknown} context - The `this` value for the task invocation;
+ *   when falsy the wrapper's own `this` is used.
+ * @returns {(...cbArgs: any[]) => Promise<unknown>} The promise-returning
+ *   wrapper.
  */
 export function Task(
 	task: (...args: any[]) => void,
 	args: any[] = [],
 	context?: unknown,
 ): (...cbArgs: any[]) => Promise<unknown> {
-	return function (this: unknown) {
-		const toApply = Array.prototype.slice.call(arguments) as any[];
-
+	return function (this: unknown, ...cbArgs: any[]) {
 		return new Promise((resolve, reject) => {
-			const callback = function (value: unknown, err: unknown) {
+			cbArgs.push((value: unknown, err: unknown) => {
 				if (!value && err) {
 					reject(err);
 				} else {
 					resolve(value);
 				}
-			};
-			// Add the callback to the arguments list
-			toApply.push(callback);
-
-			// Apply all arguments to the functions
-			task.apply(context || this, toApply);
+			});
+			task.apply(context || this, cbArgs);
 		});
 	};
 }
