@@ -17,6 +17,15 @@
 
 ### Fixed
 
+- A paragraph opening with a polyfilled `initial-letter` cap could overflow
+  its column far past the bottom of the page: the overflow range starts inside
+  the cap's span, which the module inserted after parsing and therefore
+  without the `data-ref` the engine maps rendered nodes by, so no break was
+  taken at all. The cap now carries a ref of its own, and a `column-span: all`
+  heading with `break-after: avoid` is matched against the next *significant*
+  node (whitespace used to hide the following block, silently disabling the
+  room reserved for its drop cap), so such a heading moves to the next page
+  instead of being stranded at the bottom of one.
 - `examples/previewer.html` did not paginate at all: it imported a
   `dist/paged.esm.js` bundle that has not been built for years. It now uses
   the polyfill bundle like the other demos.

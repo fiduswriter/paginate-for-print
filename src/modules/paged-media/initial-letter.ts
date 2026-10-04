@@ -1,5 +1,6 @@
 import Handler from "../handler.js";
 import type { HandlerSource } from "../handler.js";
+import { UUID } from "../../utils/utils.js";
 import csstree from "css-tree";
 import type { CssNode, List } from "css-tree";
 
@@ -123,6 +124,13 @@ class InitialLetter extends Handler {
 		const span = document.createElement("span");
 		span.classList.add("paged_initial_letter");
 		span.textContent = letter;
+		// The cap is inserted after parsing, so it carries no `data-ref` from
+		// the parser; without one the layout engine cannot resolve the cap's
+		// source counterpart, and an overflow range that starts inside the
+		// cap goes unmappable: the break is then skipped entirely and the
+		// cap's paragraph spills past the page's content area instead of
+		// continuing on the next page.
+		span.dataset.ref = UUID();
 		// The line count lets the layout engine reserve room for the float
 		// (a drop cap's first line box spans all of it) when deciding whether
 		// a following block fits below a column-span heading.

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<style>
+		body {
+			column-count: 2;
+			column-gap: 20px;
+			font-family: serif;
+			font-size: 16px;
+			line-height: 20px;
+		}
+		@page {
+			size: 220px 300px;
+			margin: 20px;
+		}
+		h2 {
+			column-span: all;
+			break-after: avoid;
+			font-size: 20px;
+			line-height: 24px;
+			margin: 0 0 6px 0;
+		}
+		/* The drop cap needs three lines of room under the heading. */
+		h2 + p {
+			initial-letter: 3;
+		}
+		p {
+			margin: 0 0 10px 0;
+		}
+	</style>
+	<script src="../../../dist/paginate.polyfill.js"></script>
+</head>
+<body>
+	<p>Filler paragraph one keeps the first columns of the page busy with words.</p>
+	<p>Filler paragraph two keeps the first columns of the page busy with words.</p>
+	<p>Filler paragraph three keeps the first columns busy with words.</p>
+	<p>Filler paragraph four keeps the first columns busy with words.</p>
+	<p>Filler paragraph five keeps the first columns busy with words.</p>
+	<h2 id="span-header">A header spanning every column</h2>
+	<p>Curiouser and curiouser cried Alice, and the drop cap below needs three lines of room before the paragraph can start at all, so the heading above it may not be left at the very bottom of a page with nothing under it.</p>
+	<p>Filler paragraph after the header keeps the remaining columns of the page busy with more words.</p>
+	<p>Filler paragraph after the header keeps the remaining columns of the page busy.</p>
+	<p>Filler paragraph after the header keeps the remaining columns of the page busy.</p>
+	<p>Filler paragraph after the header keeps the remaining columns of the page busy.</p>
+	<p>Filler paragraph after the header keeps the remaining columns of the page busy.</p>
+	<p>Filler paragraph after the header keeps the remaining columns of the page busy.</p>
+</body>
+</html>

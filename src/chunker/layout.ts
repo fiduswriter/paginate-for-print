@@ -4277,12 +4277,20 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 		let content = 0;
 		let hasBlockChildren = false;
 		for (const childNode of Array.from(el.children)) {
-			const childRef = (childNode as HTMLElement).dataset?.ref;
+			const child = childNode as HTMLElement;
+			const childRef = child.dataset?.ref;
 			const childRec = childRef ? elementMeasures.get(childRef) : undefined;
 			const isBlock = childRec
 				? childRec.block && childRec.display !== "none"
 				: true;
 			if (!isBlock) {
+				continue;
+			}
+			// A floated child (the polyfill's `initial-letter` cap is one)
+			// blockifies, but its box hangs beside the text instead of
+			// stacking below it: counting it would add the cap's height to
+			// the block that already wraps around it.
+			if (child.style.float && child.style.float !== "none") {
 				continue;
 			}
 			hasBlockChildren = true;
@@ -5320,7 +5328,13 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 				let defer = this.shouldDeferColumnSpan(wrapper, node);
 				if (!defer) {
 					const spanEl = node as HTMLElement;
-					const nextNode = nodeAfter(node, source, false, false);
+					// The next *significant* node, not the literal next sibling:
+					// whitespace between the span and the block it introduces
+					// carries no dataset and no drop cap, which silently
+					// disabled both the `break-after: avoid` lookahead and the
+					// room reserved for an `initial-letter` on the block after
+					// the span.
+					const nextNode = nodeAfter(node, source, false);
 					const avoidAfter =
 						spanEl.dataset?.breakAfter === "avoid" ||
 						((nextNode as HTMLElement | undefined)?.dataset
