@@ -188,16 +188,18 @@ window.PaginateConfig = {
 			}
 			if ((win as unknown as { __PAGED_RENDER_DONE?: boolean }).__PAGED_RENDER_DONE) {
 				window.clearInterval(timer);
-				settled = true;
 				try {
 					if (config.printCallback) {
 						config.printCallback(win);
-						resolve(iframe);
 					} else {
 						win.focus();
 						win.print();
-						resolve(iframe);
 					}
+					// Only settle after the callback ran: a throwing callback
+					// must reach `fail` (and the caller) instead of leaving
+					// the returned promise pending forever.
+					settled = true;
+					resolve(iframe);
 					if (!config.keepIframe && !renderTo) {
 						window.setTimeout(() => iframe.remove(), 0);
 					}

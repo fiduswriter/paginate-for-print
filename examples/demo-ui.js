@@ -164,45 +164,28 @@
 		return source.replace("</head>", override + "</head>");
 	}
 
-	async function generatePdf(		source,
+	/**
+	 * Paginates arbitrary source HTML in a hidden frame and returns real
+	 * vector PDF bytes. `htmlToPDF` forwards `onProgress` to the emitter and
+	 * tears the print frame down itself, so there is no separate path for
+	 * progress reporting.
+	 */
+	async function generatePdf(
+		source,
 		{ title = document.title, onProgress, settings } = {},
 	) {
-		const { htmlToPDF, emitPdfFromPagedWindow, printHTML } =
-			await import(new URL("paginate.demo.js", bundleBase()).href);
-		if (!onProgress) {
-			return htmlToPDF(source.replace(POLYFILL_TAG_RE, ""), {
-				title,
-				polyfillURL: new URL(
-					"paginate.polyfill.js",
-					bundleBase(),
-				).href,
-				metadata: { title },
-				settings,
-			});
-		}
-		// With progress reporting: keep the print frame around and feed
-		// emitter status to the caller while pages are emitted.
-		let iframe;
-		const bytes = await new Promise((resolve, reject) => {
-			printHTML(source.replace(POLYFILL_TAG_RE, ""), {
-				title,
-				polyfillURL: new URL("paginate.polyfill.js", bundleBase()).href,
-				keepIframe: true,
-				settings,
-				errorCallback: reject,
-				printCallback: (win) => {
-					emitPdfFromPagedWindow(win, onProgress, {
-						sourceHtml: source.replace(POLYFILL_TAG_RE, ""),
-						metadata: { title },
-						baseUrl: bundleBase(),
-					})
-						.then(resolve)
-						.catch(reject)
-						.finally(() => iframe?.remove());
-				},
-			}).then((frame) => (iframe = frame));
+		const { htmlToPDF } = await import(
+			new URL("paginate.demo.js", bundleBase()).href
+		);
+		const base = bundleBase();
+		return htmlToPDF(source.replace(POLYFILL_TAG_RE, ""), {
+			title,
+			polyfillURL: new URL("paginate.polyfill.js", base).href,
+			metadata: { title },
+			baseUrl: base,
+			settings,
+			onProgress,
 		});
-		return bytes;
 	}
 
 	const DemoUI = {
