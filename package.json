@@ -1,6 +1,6 @@
 {
     "name": "paginate-for-print",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "packageManager": "pnpm@10.29.3",
     "description": "Paginates web content in the browser for print and PDF generation",
     "author": "Johannes Wilm",
