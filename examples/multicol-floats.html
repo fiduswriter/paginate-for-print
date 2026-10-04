@@ -49,13 +49,13 @@ body {
 </style>
 <script src="demo-ui.js"></script>
 <script>
-window.PagedConfig = { auto: false };
+window.PaginateConfig = { auto: false };
 </script>
-<script src="../dist/paged.polyfill.js"></script>
+<script src="../dist/paginate.polyfill.js"></script>
 <script>
-if (!window.PagedPolyfill) {
+if (!window.PaginatePolyfill) {
 	// Not running from a check-out with a build: load the released bundle.
-	document.write('<script src="https://cdn.jsdelivr.net/npm/paginate-for-print@1/dist/paged.polyfill.js"><\/script>');
+	document.write('<script src="https://cdn.jsdelivr.net/npm/paginate-for-print@1/dist/paginate.polyfill.js"><\/script>');
 }
 </script>
 </head>
@@ -266,7 +266,7 @@ if (!window.PagedPolyfill) {
 		const output = document.getElementById("output");
 		output.innerHTML = "";
 		try {
-			const previewer = new window.Paged.Previewer();
+			const previewer = new window.Paginate.Previewer();
 			// Parse to a fragment: the chunker needs DOM input, and
 			// <style> elements inside the fragment still apply.
 			const template = document.createElement("template");

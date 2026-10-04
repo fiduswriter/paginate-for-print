@@ -7,7 +7,7 @@
   <title>Pagedjs Viewer</title>
   <meta content="width=device-width, initial-scale=1" name="viewport">
 
-  <script src="../dist/paged.js"></script>
+  <script src="../dist/paginate.js"></script>
 
   <script>
     let ready = new Promise(function(resolve, reject){
@@ -25,7 +25,7 @@
 
     ready.then(async function () {
       // Create a new Previewer
-      let previewer = new Paged.Previewer();
+      let previewer = new Paginate.Previewer();
 
       // Get the URL to load
       let params = URLSearchParams && new URLSearchParams(document.location.search.substring(1));

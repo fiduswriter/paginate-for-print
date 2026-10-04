@@ -4,7 +4,7 @@
  * This module holds no logic: it exists only to re-export, under a single
  * namespace, the classes, registry functions and values that third parties
  * (and the polyfill bundle) may touch. The polyfill assigns this whole
- * namespace to `window.Paged`, so the export list below is the library's
+ * namespace to `window.Paginate`, so the export list below is the library's
  * public browser API surface: do not add, rename, or drop exports, and keep
  * the three type-only exports type-only (they must not appear at runtime).
  *

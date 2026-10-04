@@ -1,3 +1,26 @@
+## Unreleased
+
+### Breaking
+
+- The browser bundles are renamed with a `paginate` base: `dist/paged.js` →
+  `dist/paginate.js`, `dist/paged.min.js` → `dist/paginate.min.js` and
+  `dist/paged.polyfill.js` → `dist/paginate.polyfill.js`. The npm entry point
+  moves accordingly (`types/paginate.d.ts`); the library's source entry is
+  `src/paginate.ts`.
+- The browser globals are renamed to match: `window.PagedPolyfill` →
+  `window.PaginatePolyfill`, `window.PagedConfig` → `window.PaginateConfig`
+  and the API namespace `window.Paged` → `window.Paginate`.
+- `dist/paginate.demo.js` is new: a self-contained API bundle for the
+  examples (which import it directly in the browser, where the bare
+  `pages-to-pdf` specifier of the npm entries cannot resolve). It is not part
+  of the npm package.
+
+### Fixed
+
+- `examples/previewer.html` did not paginate at all: it imported a
+  `dist/paged.esm.js` bundle that has not been built for years. It now uses
+  the polyfill bundle like the other demos.
+
 ## 1.1.0 (2026-10-03)
 
 ### Changed

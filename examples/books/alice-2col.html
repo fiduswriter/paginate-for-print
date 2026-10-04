@@ -103,14 +103,14 @@ h2 + p {
 <script>
 	DemoUI.addMeasurementSelect();
 	DemoUI.addColumnSelect();
-	window.PagedConfig = {
+	window.PaginateConfig = {
 		settings: DemoUI.getMeasurementSettings()
 	};
 	document.addEventListener("DOMContentLoaded", () => {
 		DemoUI.addDownloadButton({ title: 'Alice’s Adventures in Wonderland' });
 	});
 </script>
-<script src="../../dist/paged.polyfill.js"></script>
+<script src="../../dist/paginate.polyfill.js"></script>
 </head>
 <body>
 <h1>Alice’s Adventures in Wonderland<span class="author">Lewis Carroll</span></h1>

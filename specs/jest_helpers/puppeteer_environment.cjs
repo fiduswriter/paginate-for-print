@@ -92,7 +92,7 @@ class PuppeteerEnvironment extends TestEnvironment {
 
 		await page.addInitScript(() => {
 			document.addEventListener("DOMContentLoaded", () => {
-				window.PagedPolyfill.on("rendered", (flow) => {
+				window.PaginatePolyfill.on("rendered", (flow) => {
 					let msg = "Rendering " + flow.total + " pages took " + flow.performance + " milliseconds.";
 					window.onRendered(msg, flow.width, flow.height, flow.orientation);
 				});

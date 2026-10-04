@@ -33,7 +33,7 @@ export interface PrintHTMLConfig {
 	/** Called with a message when something goes wrong. */
 	errorCallback?: (message: string) => void;
 	/**
-	 * URL of the paginate-for-print polyfill bundle (`dist/paged.polyfill.js`) to
+	 * URL of the paginate-for-print polyfill bundle (`dist/paginate.polyfill.js`) to
 	 * load inside the iframe. Defaults to a URL relative to this bundle,
 	 * which works when dist/ output is served as-is.
 	 */
@@ -68,10 +68,10 @@ function defaultPolyfillURL(): string {
 	for (const script of Array.from(document.querySelectorAll("script[src]"))) {
 		const src = (script as HTMLScriptElement).src || "";
 		if (/paged[^/]*\.js$/.test(src)) {
-			return new URL("paged.polyfill.js", src).href;
+			return new URL("paginate.polyfill.js", src).href;
 		}
 	}
-	return new URL("paged.polyfill.js", window.location.href).href;
+	return new URL("paginate.polyfill.js", window.location.href).href;
 }
 
 const PRINT_TIMEOUT_MS = 300000;
@@ -150,7 +150,7 @@ export function printHTML(
 		// startup.
 		const bootstrap = `<script>window.__PAGED_PRINT_ACTIVE = true;
 window.__PAGED_BUNDLE_BASE = ${JSON.stringify(bundleBase)};
-window.PagedConfig = {
+window.PaginateConfig = {
 	auto: true,
 	settings: ${settingsJSON},
 	after: function () {

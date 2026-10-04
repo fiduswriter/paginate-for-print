@@ -35,8 +35,8 @@ export default [
 		input: "./src/polyfill/polyfill.ts",
 		output: {
 			sourcemap: true,
-			name: "PagedPolyfill",
-			file: "./dist/paged.polyfill.js",
+			name: "PaginatePolyfill",
+			file: "./dist/paginate.polyfill.js",
 			format: "umd",
 		},
 		plugins: plugins,

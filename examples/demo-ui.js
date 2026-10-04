@@ -8,7 +8,7 @@
  *   purely an optimization for finished pages.
  * - `DemoUI.addDownloadButton()`: adds a fixed "Download PDF" button that
  *   paginates this page's source in a hidden frame and saves a real
- *   vector PDF (via dist/paged.pdf.js).
+ *   vector PDF (via dist/paginate.js).
  * - `DemoUI.addMeasurementSelect()`: lets the user switch between the
  *   library's text-measurement backends (dom / pretext / fast). The chosen
  *   mode is persisted in the URL query string and used for both on-screen
@@ -41,7 +41,7 @@
 	}
 
 	const POLYFILL_TAG_RE =
-		/<script[^>]+src="[^"]*paged\.polyfill\.js"[^>]*>\s*<\/script>\s*/gi;
+		/<script[^>]+src="[^"]*paginate\.polyfill\.js"[^>]*>\s*<\/script>\s*/gi;
 
 	async function getSource() {
 		if (window.__DEMO_SOURCE) {
@@ -94,7 +94,7 @@
 	 * vector PDF bytes.
 	 */
 	function bundleBase() {
-		const tag = document.querySelector('script[src*="paged.polyfill"]');
+		const tag = document.querySelector('script[src*="paginate.polyfill"]');
 		if (tag) {
 			return new URL(".", tag.src).href;
 		}
@@ -168,12 +168,12 @@
 		{ title = document.title, onProgress, settings } = {},
 	) {
 		const { htmlToPDF, emitPdfFromPagedWindow, printHTML } =
-			await import(new URL("paged.js", bundleBase()).href);
+			await import(new URL("paginate.demo.js", bundleBase()).href);
 		if (!onProgress) {
 			return htmlToPDF(source.replace(POLYFILL_TAG_RE, ""), {
 				title,
 				polyfillURL: new URL(
-					"paged.polyfill.js",
+					"paginate.polyfill.js",
 					bundleBase(),
 				).href,
 				metadata: { title },
@@ -186,7 +186,7 @@
 		const bytes = await new Promise((resolve, reject) => {
 			printHTML(source.replace(POLYFILL_TAG_RE, ""), {
 				title,
-				polyfillURL: new URL("paged.polyfill.js", bundleBase()).href,
+				polyfillURL: new URL("paginate.polyfill.js", bundleBase()).href,
 				keepIframe: true,
 				settings,
 				errorCallback: reject,

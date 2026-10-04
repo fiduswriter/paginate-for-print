@@ -2,10 +2,10 @@
  * Auto-polyfill entry point.
  *
  * This is the browser-entry "polyfill" script: on evaluation it publishes the
- * library's API namespace as `window.Paged`, snapshots the user configuration
- * from `window.PagedConfig` (read once), constructs the single
+ * library's API namespace as `window.Paginate`, snapshots the user configuration
+ * from `window.PaginateConfig` (read once), constructs the single
  * {@link Previewer} instance with the user's `settings`, publishes it as
- * `window.PagedPolyfill` and as this module's default export, and — once the
+ * `window.PaginatePolyfill` and as this module's default export, and — once the
  * document reaches the "interactive" ready state (or immediately when the
  * script is evaluated while already interactive/complete) — runs the optional
  * `before` hook, auto-runs `previewer.preview(content, stylesheets, renderTo)`
@@ -18,18 +18,18 @@
  * promise rejection.
  */
 import Previewer from "./previewer.js";
-import * as Paged from "../index.js";
+import * as Paginate from "../index.js";
 
 declare global {
 	interface Window {
-		Paged: typeof Paged;
-		PagedPolyfill: Previewer;
-		PagedConfig?: PagedConfig;
+		Paginate: typeof Paginate;
+		PaginatePolyfill: Previewer;
+		PaginateConfig?: PaginateConfig;
 	}
 }
 
 /**
- * User configuration read once from `window.PagedConfig` at script
+ * User configuration read once from `window.PaginateConfig` at script
  * evaluation.
  *
  * - `auto` — only the exact value `false` disables the automatic preview; any
@@ -43,7 +43,7 @@ declare global {
  * - `settings` — consumed only as the `Previewer` constructor argument; it is
  *   not forwarded to `preview(...)`.
  */
-export interface PagedConfig {
+export interface PaginateConfig {
 	auto?: boolean;
 	before?: () => void | Promise<void>;
 	after?: (result?: unknown) => void | Promise<void>;
@@ -55,7 +55,7 @@ export interface PagedConfig {
 
 // Publish the library's full API namespace synchronously, for debugging and
 // for external scripts.
-window.Paged = Paged;
+window.Paginate = Paginate;
 
 /**
  * Promise of the document's ready-state string, settling at the
@@ -83,10 +83,10 @@ const ready: Promise<string> = new Promise<string>((resolve) => {
 	}
 });
 
-// The user's configuration, read exactly once here: when `window.PagedConfig`
+// The user's configuration, read exactly once here: when `window.PaginateConfig`
 // is truthy, `config` IS that object (by reference — no copying, merging,
 // validation or mutation); otherwise a fresh default object is used.
-const config: PagedConfig = window.PagedConfig || { auto: true };
+const config: PaginateConfig = window.PaginateConfig || { auto: true };
 
 // The single previewer instance for this script load, constructed with the
 // user's settings (possibly `undefined`).
@@ -97,7 +97,7 @@ export default previewer;
 
 // ... and is published on the window, so callers can drive previews manually
 // or observe rendering events.
-window.PagedPolyfill = previewer;
+window.PaginatePolyfill = previewer;
 
 // The auto-run chain: await `before`, then auto-run the preview unless
 // `auto` is exactly `false`, then await `after` with the preview result

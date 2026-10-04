@@ -16,7 +16,7 @@ export interface PaginateConfig {
     /** Called with a message when pagination fails. */
     errorCallback?: (message: string) => void;
     /**
-     * URL of the polyfill bundle (`dist/paged.polyfill.js`) to load inside
+     * URL of the polyfill bundle (`dist/paginate.polyfill.js`) to load inside
      * the print iframe. Engines that paginate with a script bundle loaded by
      * URL honor this setting; hosts that serve the bundle from their own
      * static files pass its URL here. When omitted, a URL relative to the

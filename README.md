@@ -100,7 +100,7 @@ continuously across pages.
 Three text-breaking backends are available via settings:
 
 ```js
-window.PagedConfig = {
+window.PaginateConfig = {
 	settings: {
 		textMeasurement: "dom", // default: legacy DOM walker (fastest)
 		// textMeasurement: "pretext", // predicted breaking, verified
@@ -233,12 +233,12 @@ URL.revokeObjectURL(url);
 pagination iframe, so most consumers do not need to reference it directly.
 
 To paginate a whole page in place (for example to add custom handlers or to
-drive the layout from a plain HTML page), add the `paged.polyfill.js` script.
+drive the layout from a plain HTML page), add the `paginate.polyfill.js` script.
 It replaces all `@page` CSS and renders the page with Paged Media styles
 applied:
 
 ```html
-<script src="https://unpkg.com/paginate-for-print/dist/paged.polyfill.js"></script>
+<script src="https://unpkg.com/paginate-for-print/dist/paginate.polyfill.js"></script>
 ```
 
 By default the polyfill will run automatically as soon as the DOM is ready.
@@ -246,7 +246,7 @@ However, you can add an async `before` function or return a Promise to delay the
 
 ```html
 <script>
-	window.PagedConfig = {
+	window.PaginateConfig = {
 		before: () => {
 			return new Promise((resolve, reject) => {
 				setTimeout(() => { resolve() }, 1000);
@@ -257,18 +257,18 @@ However, you can add an async `before` function or return a Promise to delay the
 </script>
 ```
 
-Otherwise you can disable `auto` running the previewer and call `window.PagedPolyfill.preview();`
+Otherwise you can disable `auto` running the previewer and call `window.PaginatePolyfill.preview();`
 whenever you want to start.
 
 ```html
 <script>
-	window.PagedConfig = {
+	window.PaginateConfig = {
 		auto: false,
 		after: (flow) => { console.log("after", flow) },
 	};
 
 	setTimeout(() => {
-		window.PagedPolyfill.preview();
+		window.PaginatePolyfill.preview();
 	}, 1000);
 </script>
 ```
@@ -284,12 +284,12 @@ Converts `@page` css to classes, and applies counters and content.
 Modules are groups of handlers that apply the layout and styles of a CSS
 module, such as Generated Content or Page Floats.
 
-When the polyfill bundle (`dist/paged.polyfill.js`) runs it exposes a global
+When the polyfill bundle (`dist/paginate.polyfill.js`) runs it exposes a global
 `Paged` object; custom handlers can be registered on the page that loads the
 polyfill:
 
 ```html
-<script src="https://unpkg.com/paginate-for-print/dist/paged.polyfill.js"></script>
+<script src="https://unpkg.com/paginate-for-print/dist/paginate.polyfill.js"></script>
 <script>
 	class MyHandler extends Paged.Handler {
 		constructor(chunker, polisher, caller) {

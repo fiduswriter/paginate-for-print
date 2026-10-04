@@ -67,8 +67,8 @@
     "type": "module",
     "exports": {
         ".": {
-            "types": "./types/paged.d.ts",
-            "default": "./dist/paged.js"
+            "types": "./types/paginate.d.ts",
+            "default": "./dist/paginate.js"
         }
     },
     "dependencies": {
@@ -131,15 +131,15 @@
         "url": "https://github.com/fiduswriter/paginate-for-print.git"
     },
     "files": [
-        "dist/paged.js",
-        "dist/paged.js.map",
-        "dist/paged.min.js",
-        "dist/paged.min.js.map",
-        "dist/paged.polyfill.js",
-        "dist/paged.polyfill.js.map",
+        "dist/paginate.js",
+        "dist/paginate.js.map",
+        "dist/paginate.min.js",
+        "dist/paginate.min.js.map",
+        "dist/paginate.polyfill.js",
+        "dist/paginate.polyfill.js.map",
         "dist/fonts",
-        "types/paged.d.ts",
-        "types/paged.d.ts.map",
+        "types/paginate.d.ts",
+        "types/paginate.d.ts.map",
         "types/print.d.ts",
         "types/print.d.ts.map",
         "LICENSE.md",

@@ -36,8 +36,8 @@ export default [
 	{
 		input: "./src/polyfill/polyfill.ts",
 		output: {
-			name: "PagedPolyfill",
-			file: "./dist/paged.polyfill.js",
+			name: "PaginatePolyfill",
+			file: "./dist/paginate.polyfill.js",
 			format: "umd",
 			sourcemap: true,
 		},
@@ -48,10 +48,10 @@ export default [
 	// pages-to-pdf is external so consumers bring their own copy and the bundle
 	// stays small.
 	{
-		input: "./src/paged.ts",
+		input: "./src/paginate.ts",
 		external: ["pages-to-pdf"],
 		output: {
-			file: "./dist/paged.js",
+			file: "./dist/paginate.js",
 			format: "es",
 			sourcemap: true,
 		},
@@ -60,13 +60,28 @@ export default [
 
 	// Minified public API.
 	{
-		input: "./src/paged.ts",
+		input: "./src/paginate.ts",
 		external: ["pages-to-pdf"],
 		output: {
-			file: "./dist/paged.min.js",
+			file: "./dist/paginate.min.js",
 			format: "es",
 			sourcemap: true,
 		},
 		plugins: [plugins, terser()],
+	},
+
+	// Self-contained API bundle for the examples' direct browser import:
+	// `pages-to-pdf` is bundled in (unlike the npm entries above), because a
+	// browser cannot resolve the bare package specifier. Demo-only; not
+	// listed in package.json "files".
+	{
+		input: "./src/paginate.ts",
+		output: {
+			file: "./dist/paginate.demo.js",
+			format: "es",
+			sourcemap: true,
+			inlineDynamicImports: true,
+		},
+		plugins: plugins,
 	},
 ];

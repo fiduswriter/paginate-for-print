@@ -23,7 +23,7 @@
  *   node dev-tools/inspect-pages.mjs specs/multicol/two-columns/two-columns.html
  *
  * Requires a build first (`npm run build`): the examples load
- * `dist/paged.polyfill.js`, which is gitignored and only exists after a build.
+ * `dist/paginate.polyfill.js`, which is gitignored and only exists after a build.
  */
 import express from "express";
 import { chromium } from "playwright-core";

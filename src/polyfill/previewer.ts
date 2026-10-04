@@ -32,7 +32,7 @@ import type Page from "../chunker/page.js";
 import { initializeHandlers, registerHandlers } from "../utils/handlers.js";
 import type Handler from "../modules/handler.js";
 import type { PagedEventEmitter } from "../types/emitter.js";
-import type { PagedConfig } from "./polyfill.js";
+import type { PaginateConfig } from "./polyfill.js";
 
 /** A length with a unit, e.g. `{ value: 8.5, unit: "in" }`. */
 export interface PageSize {
@@ -443,4 +443,4 @@ export default Previewer;
 
 // Re-exported for consumers of this module's types.
 export type { PolisherHooks };
-export type { PagedConfig };
+export type { PaginateConfig };

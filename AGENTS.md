@@ -29,7 +29,7 @@ npm start        # rollup watch + dev server (examples)
 - Full spec suite: `npm run specs` (runs build + compile first)
 
 **`dist/` and `lib/` are gitignored and not committed.** Specs load
-`dist/paged.polyfill.js`, so after changing `src/` you must run
+`dist/paginate.polyfill.js`, so after changing `src/` you must run
 `npm run build` before running specs or looking at the examples.
 
 ## Repository layout
@@ -55,7 +55,7 @@ npm start        # rollup watch + dev server (examples)
   `books/alice-2col.html`). Run `npm start` and open them.
 - `specs/` — jest specs, run in Chromium via Playwright. Each DOM spec is a
   `*.spec.js` + `*.html` pair under a directory; the HTML loads
-  `../../../dist/paged.polyfill.js` and the spec asserts on the rendered DOM.
+  `../../../dist/paginate.polyfill.js` and the spec asserts on the rendered DOM.
   Some suites use `it_snapshots` to render PDFs; those need Ghostscript and
   are skipped otherwise.
 
