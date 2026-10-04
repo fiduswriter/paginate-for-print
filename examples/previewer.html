@@ -9,13 +9,19 @@
 
     <link rel="coverpage" href="assets/aurorae/images/cover.jpg" />
 
-    <script type="module">
-      import { Previewer } from '../dist/paged.esm.js';
-
-      let previewer = new Previewer();
-      window.addEventListener('DOMContentLoaded', async () => {
-        await previewer.preview()
+    <script src="demo-ui.js"></script>
+    <script>
+      document.addEventListener("DOMContentLoaded", () => {
+        DemoUI.addDownloadButton({ title: 'Auroræ: Their Characters and Spectra' });
       });
+    </script>
+
+    <script src="../dist/paged.polyfill.js"></script>
+    <script>
+      if (!window.PagedPolyfill) {
+        // Not running from a check-out with a build: load the released bundle.
+        document.write('<script src="https://cdn.jsdelivr.net/npm/paginate-for-print@1/dist/paged.polyfill.js"><\/script>');
+      }
     </script>
 
     <link href="assets/aurorae/book.css" rel="stylesheet" type='text/css'>
