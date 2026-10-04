@@ -104,6 +104,13 @@ async function preparePagination(
 				reject(new Error(message));
 			},
 			keepIframe: true,
+			// The caller emits the PDF from the returned window, so the
+			// pagination frame must not print itself. printHTML prints the
+			// iframe whenever no printCallback is given, so suppress that
+			// explicitly — same as renderHTML and htmlToPDF do.
+			printCallback: () => {
+				// Nothing to print: preparePagination only prepares the frame.
+			},
 		}).then((iframe) => {
 			if (failed) {
 				// The promise has already been rejected via errorCallback.
