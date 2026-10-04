@@ -11,7 +11,7 @@
 
     <script src="../../../dist/paginate.polyfill.js"></script>
     <script>
-    class TestHandler extends Paged.Handler {
+    class TestHandler extends Paginate.Handler {
       constructor(chunker, polisher, caller) {
         super(chunker, polisher, caller);
       }
@@ -26,7 +26,7 @@
         // return false;
       }
     }
-    Paged.registerHandlers(TestHandler);
+    Paginate.registerHandlers(TestHandler);
     </script>
 		<style>
 			@page {

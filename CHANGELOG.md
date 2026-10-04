@@ -1,4 +1,4 @@
-## Unreleased
+## 1.1.1 (2026-10-04)
 
 ### Breaking
 
@@ -29,6 +29,15 @@
 - `examples/previewer.html` did not paginate at all: it imported a
   `dist/paged.esm.js` bundle that has not been built for years. It now uses
   the polyfill bundle like the other demos.
+- The `specs/tables/copy-column-widths` fixture still registered its
+  "repeating thead" handler through the removed `Paged` global, so the suite
+  failed with a `ReferenceError` before its assertions ran. The obsolete
+  handler is dropped from the fixture (the engine repeats a split table's
+  header by itself; re-registering it renders the header twice per page), and
+  `specs/hooks/hooks.html` is updated to the `Paginate` global.
+- Fifteen PDF render baselines (footnote and table specs) no longer matched the
+  rendered output — drift predating the changes above, which the render specs
+  job on `main` had been reporting. They are refreshed to the current output.
 
 ## 1.1.0 (2026-10-03)
 
