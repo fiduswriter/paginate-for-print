@@ -1265,14 +1265,64 @@ class Layout {
 				((dest as WithRefs).indexOfRefs = {});
 			refs[ref] = clone as HTMLElement;
 		}
+		const flowHost = dest.closest(".paged_flow") as HTMLElement | null;
+		const floatTopBefore = flowHost
+			? flowHost.querySelector(":scope > .paged_float_top")
+			: null;
+		const floatHeightBefore = floatTopBefore
+			? floatTopBefore.getBoundingClientRect().height
+			: 0;
 		const results = this.hooks.renderNode.triggerSync(clone, node, this);
 		for (const result of results) {
 			if (result !== undefined) {
 				clone = result as ChildNode;
 			}
 		}
+		// A page float that just landed in the flow's top float row shrinks
+		// the room the planned segment rows were sized against. Re-fix the
+		// last row to the actually remaining space so the walk keeps
+		// detecting overflow at column boundaries instead of overfilling the
+		// page (the row is flex-shrink: 0 by design so later spans cannot
+		// shrink it underneath already-balanced columns).
+		if (flowHost) {
+			const floatTopAfter = flowHost.querySelector(
+				":scope > .paged_float_top",
+			);
+			const floatHeightAfter = floatTopAfter
+				? floatTopAfter.getBoundingClientRect().height
+				: 0;
+			if (floatHeightAfter > floatHeightBefore + COLUMN_EPSILON) {
+				this.replanFixedSegmentRows(flowHost);
+			}
+		}
 		this.invalidateBounds();
 		return clone;
+	}
+
+	/**
+	 * Re-fixes the last planned segment row to the space actually left by
+	 * the flow host's other children (top float, span rows, spanned blocks).
+	 * Only ever shrinks: the plan was made before later siblings took their
+	 * space, so growth is not a planning correction.
+	 */
+	private replanFixedSegmentRows(wrapper: HTMLElement): void {
+		const rows = wrapper.querySelectorAll<HTMLElement>(
+			":scope > .paged_columns",
+		);
+		const last = rows[rows.length - 1];
+		if (!last || last.dataset.pagedSegmentFixed !== "true") {
+			return;
+		}
+		const remaining =
+			wrapper.getBoundingClientRect().height - last.offsetTop;
+		const current = last.getBoundingClientRect().height;
+		if (
+			remaining > COLUMN_EPSILON &&
+			remaining < current - COLUMN_EPSILON
+		) {
+			this.fixSegmentRowHeight(last, remaining);
+			this.invalidateBounds();
+		}
 	}
 
 	/**
@@ -1763,8 +1813,16 @@ class Layout {
 					}
 				}
 			} else if (
-				pos.left < bLeft ||
-				pos.right > bRight ||
+				(this.inManualColumns
+					// Inside manual columns a purely horizontal overhang is
+					// normal inline behavior (a no-wrap run, an ellipsized TOC
+					// label) that a column break cannot fix; only content
+					// sitting entirely outside the bounds counts, so such runs
+					// stay whole instead of being shredded. The vertical edges
+					// decide the break position.
+					? pos.right < bLeft - COLUMN_EPSILON ||
+						pos.left > bRight + COLUMN_EPSILON
+					: pos.left < bLeft || pos.right > bRight) ||
 				pos.top < bTop ||
 				bottom > bBottom
 			) {
@@ -1772,6 +1830,15 @@ class Layout {
 			}
 		}
 		return result;
+	}
+
+	/**
+	 * Whether the active layout root is a manual column box: only then do
+	 * purely horizontal overhangs get the entirely-outside treatment in
+	 * {@link firstOverflowingChild}.
+	 */
+	private get inManualColumns(): boolean {
+		return this.element.classList.contains("paged_column");
 	}
 
 	/**
@@ -2127,6 +2194,37 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 			if (!wantsAvoid) {
 				break;
 			}
+			// The avoid marks guard the boundary *before* the carrier. A break
+			// that keeps any of the carrier's content on this page never
+			// crosses that boundary (the previous sibling and the carrier's
+			// kept head stay together), so only a break at the carrier's very
+			// start needs the pull-back; pulling a mid-carrier break backwards
+			// would discard fitting content and can park the break on a
+			// textless inline node such as a footnote call anchor.
+			let keepsCarrierContent = false;
+			if (position !== carrier) {
+				if (isText(position) && offset) {
+					keepsCarrierContent = true;
+				} else {
+					let probe: Node | null = position;
+					while ((probe = probe.previousSibling)) {
+						if (
+							isText(probe) &&
+							(probe.textContent || "").trim().length
+						) {
+							keepsCarrierContent = true;
+							break;
+						}
+						if (isElement(probe)) {
+							keepsCarrierContent = true;
+							break;
+						}
+					}
+				}
+			}
+			if (keepsCarrierContent) {
+				break;
+			}
 			const previousElement = carrier.previousElementSibling;
 			if (!previousElement) {
 				break;
@@ -2141,11 +2239,39 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 			// Position the break inside the previous element's trailing text
 			// when one exists: a tail that fits whole stays on this page (the
 			// text path advances to the next element when it fits), while a
-			// tail that crosses the edge splits at the measured line.
+			// tail that crosses the edge splits at the measured line. The
+			// descended node may itself be textless (an empty inline such as a
+			// footnote call anchor); the break must then fall back to the
+			// nearest preceding text instead of parking on the empty node.
 			if (isElement(before)) {
 				const deepestText = this.deepestTrailingText(before as Element);
 				if (deepestText) {
 					before = deepestText;
+				} else if (!(before.textContent || "").trim().length) {
+					let probe: Node | undefined = before;
+					for (;;) {
+						const previous = nodeBefore(
+							probe as Node,
+							previousElement,
+						);
+						if (!previous) {
+							break;
+						}
+						probe = previous;
+						if (
+							isText(previous) &&
+							(previous.textContent || "").trim().length
+						) {
+							before = previous;
+							break;
+						}
+						if (
+							isElement(previous) &&
+							(previous as HTMLElement).dataset?.splitFrom
+						) {
+							break;
+						}
+					}
 				}
 			}
 			position = before;
@@ -2474,6 +2600,12 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 		}
 		if (breakToken) {
 			for (const overflow of breakToken.overflow) {
+				// A zero-progress overflow (same resume position as the
+				// previous token) is recorded without extraction: nothing
+				// left the rendered flow, so the hook must not fire.
+				if (!overflow.content) {
+					continue;
+				}
 				this.hooks.afterOverflowRemoved.trigger(
 					overflow.content,
 					rendered,
@@ -5308,6 +5440,10 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 				const imgs = wrapper.querySelectorAll("img");
 				if (imgs.length) {
 					await this.waitForImages(imgs);
+					// Image loads grow page floats and shrink the room planned
+					// segment rows were fixed against; re-fix them before the
+					// overflow check reads the columns.
+					this.replanFixedSegmentRows(wrapper);
 				}
 				bounds = this.refreshBounds();
 				newBreakToken = this.findBreakToken(
@@ -5362,6 +5498,14 @@ if (this.intrinsicOverflowPoint(node, bounds)) {
 					colIndex++;
 					bounds = this.refreshBounds();
 					newBreakToken = undefined;
+					// The walker has already yielded `node` but this iteration
+					// appended nothing: rewind onto it so it is rendered at the
+					// head of the next column instead of being skipped (its
+					// parent shell would otherwise be rebuilt out of order by
+					// the first child's append).
+					if (node && (node as Node).parentElement) {
+						walker = walk(node as Node, source);
+					}
 					continue;
 				}
 				if (!node || newBreakToken) {

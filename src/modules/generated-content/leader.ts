@@ -178,6 +178,10 @@ class Leader extends Handler {
 			${entry.parentSelector}${leaderPseudo} {
 				content: "";
 				flex: 1 1 auto;
+				/* Baseline alignment (the parent's rule) gives an empty box a
+				   zero-height line: stretch the leader to the line's cross
+				   size so its repeating background can paint. */
+				align-self: stretch;
 				order: 1;
 				margin: 0 0.25em;
 				${this.leaderBackground(entry.style)}
