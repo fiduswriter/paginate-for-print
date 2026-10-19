@@ -148,5 +148,13 @@
     ],
     "optionalDependencies": {
         "fonteditor-core": "^2.6.3"
+    },
+    "overrides": {
+        "proxy-addr": "2.0.8"
+    },
+    "pnpm": {
+        "overrides": {
+            "proxy-addr": "2.0.8"
+        }
     }
 }
