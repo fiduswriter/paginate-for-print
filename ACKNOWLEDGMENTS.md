@@ -79,3 +79,35 @@ is licensed under the **GNU Lesser General Public License, version 3 or later
 full license texts in [`COPYING.LESSER`](./COPYING.LESSER) and
 [`COPYING`](./COPYING). The credits above are retained as historical
 acknowledgment of the ideas and architecture this project grew out of.
+
+### MIT license of the original upstream code
+
+The code originally derived from Paged.js in this repository was used under
+the MIT license reproduced below. **This license applied to the original code
+only — all of which has since been replaced** with the independent
+implementations described above, so no MIT-licensed code remains in the
+current source tree.
+
+```
+MIT License
+
+Copyright (c) 2018 Adam Hyde
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
