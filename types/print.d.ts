@@ -41,8 +41,8 @@ export interface PrintHTMLConfig {
     settings?: Record<string, unknown>;
     /**
      * Keep the iframe in the document after pagination finishes. Set this
-     * when the printCallback hands the window to an async consumer such
-     * as htmlToPDF; remove it yourself afterwards.
+     * when the printCallback hands the window to an async consumer such as
+     * htmlToPDF; remove it yourself afterwards.
      */
     keepIframe?: boolean;
     /**

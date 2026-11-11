@@ -20,6 +20,11 @@
  * callback the iframe prints directly and is removed.
  */
 
+import {
+	PRINT_FRAME_MARKER,
+	type PrintFrameConfig,
+} from "./print-frame.js";
+
 export interface PrintHTMLConfig {
 	/** Document title, applied to the paginated iframe document. */
 	title?: string;
@@ -42,8 +47,8 @@ export interface PrintHTMLConfig {
 	settings?: Record<string, unknown>;
 	/**
 	 * Keep the iframe in the document after pagination finishes. Set this
-	 * when the printCallback hands the window to an async consumer such
-	 * as htmlToPDF; remove it yourself afterwards.
+	 * when the printCallback hands the window to an async consumer such as
+	 * htmlToPDF; remove it yourself afterwards.
 	 */
 	keepIframe?: boolean;
 	/**
@@ -142,34 +147,28 @@ export function printHTML(
 		const bundleBase = new URL(".", polyfillURL).href;
 		const polyfillTag = `<script src="${polyfillURL}"></script>`;
 
-		const settingsJSON = JSON.stringify(config.settings || {});
-
-		// Injected before the polyfill so it applies to the auto-started
-		// preview. The `after` hook marks completion deterministically —
-		// listening for the "rendered" event from outside races polyfill
-		// startup.
-		const bootstrap = `<script>window.__PAGED_PRINT_ACTIVE = true;
-window.__PAGED_BUNDLE_BASE = ${JSON.stringify(bundleBase)};
-window.PaginateConfig = {
-	auto: true,
-	settings: ${settingsJSON},
-	after: function () {
-		window.__PAGED_RENDER_DONE = true;
-	}
-};</script>`;
+		// The srcdoc must not contain any inline script: it inherits this
+		// page's content security policy, under which an inline bootstrap
+		// script is blocked and pagination would hang until the timeout.
+		// Instead the iframe is named with the print-frame marker (srcdoc
+		// documents inherit the iframe's name as window.name), which makes
+		// the polyfill bundle wait for its configuration, and the poll loop
+		// below drives it through window.PaginatePrint.init. Only the
+		// external polyfill tag is injected into the markup.
+		iframe.name = PRINT_FRAME_MARKER;
 
 		// srcdoc gives the frame a real parsed document whose relative
 		// URLs resolve against this page — document.write into an
 		// about:blank iframe breaks both.
 		iframe.srcdoc =
-			bootstrap +
-			(markup.includes("</body>")
+			markup.includes("</body>")
 				? markup.replace("</body>", `${polyfillTag}</body>`)
-				: markup + polyfillTag);
+				: markup + polyfillTag;
 
 		iframe.onerror = () => fail("Print frame failed to load.");
 
 		const startedAt = Date.now();
+		let initialized = false;
 		const timer = window.setInterval(() => {
 			const win = iframe.contentWindow;
 			if (!win) {
@@ -182,8 +181,38 @@ window.PaginateConfig = {
 				fail("Pagination did not complete in time.");
 				return;
 			}
-			if (!(win as unknown as { __PAGED_PRINT_ACTIVE?: boolean }).__PAGED_PRINT_ACTIVE) {
-				// Polyfill not yet executed; keep waiting.
+			if (!initialized) {
+				// The bundle in the frame publishes window.PaginatePrint once
+				// it has loaded; until then keep waiting. Once available,
+				// hand the configuration over and mark the frame active.
+				const paginatePrint = (
+					win as unknown as {
+						PaginatePrint?: { init: (config: PrintFrameConfig) => void };
+					}
+				).PaginatePrint;
+				if (!paginatePrint || typeof paginatePrint.init !== "function") {
+					return;
+				}
+				try {
+					(
+						win as unknown as { __PAGED_BUNDLE_BASE?: string }
+					).__PAGED_BUNDLE_BASE = bundleBase;
+					paginatePrint.init({
+						auto: true,
+						settings: config.settings,
+						after: () => {
+							(
+								win as unknown as { __PAGED_RENDER_DONE?: boolean }
+							).__PAGED_RENDER_DONE = true;
+						},
+					});
+					(
+						win as unknown as { __PAGED_PRINT_ACTIVE?: boolean }
+					).__PAGED_PRINT_ACTIVE = true;
+					initialized = true;
+				} catch (error) {
+					fail(String(error));
+				}
 				return;
 			}
 			if ((win as unknown as { __PAGED_RENDER_DONE?: boolean }).__PAGED_RENDER_DONE) {

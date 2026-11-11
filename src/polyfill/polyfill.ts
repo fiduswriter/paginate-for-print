@@ -2,15 +2,25 @@
  * Auto-polyfill entry point.
  *
  * This is the browser-entry "polyfill" script: on evaluation it publishes the
- * library's API namespace as `window.Paginate`, snapshots the user configuration
- * from `window.PaginateConfig` (read once), constructs the single
- * {@link Previewer} instance with the user's `settings`, publishes it as
- * `window.PaginatePolyfill` and as this module's default export, and — once the
- * document reaches the "interactive" ready state (or immediately when the
- * script is evaluated while already interactive/complete) — runs the optional
- * `before` hook, auto-runs `previewer.preview(content, stylesheets, renderTo)`
- * unless `auto` is exactly `false`, and runs the optional `after` hook with
- * the preview result.
+ * library's API namespace as `window.Paginate` and the single
+ * {@link Previewer} instance as `window.PaginatePolyfill` (also this module's
+ * default export). It then — once the document reaches the "interactive"
+ * ready state (or immediately when the script is evaluated while already
+ * interactive/complete) — runs the optional `before` hook, auto-runs
+ * `previewer.preview(content, stylesheets, renderTo)` unless `auto` is
+ * exactly `false`, and runs the optional `after` hook with the preview
+ * result.
+ *
+ * The configuration comes from one of two places:
+ *
+ * - Ordinary pages: `window.PaginateConfig`, read once at script evaluation
+ *   (when absent the preview auto-runs with defaults, polyfill-style).
+ * - Print iframes (`window.name === PRINT_FRAME_MARKER`, set by
+ *   `printHTML`): auto-run is deferred and the parent page hands the
+ *   configuration to `window.PaginatePrint.init` once this bundle has
+ *   loaded. This keeps the srcdoc document free of inline scripts, which a
+ *   content security policy without `script-src 'unsafe-inline'` would
+ *   otherwise block.
  *
  * There is deliberately no error handling anywhere in the chain: a throwing
  * `before` hook aborts the whole chain (neither preview nor `after` run), a
@@ -19,6 +29,10 @@
  */
 import Previewer from "./previewer.js";
 import * as Paginate from "../index.js";
+import {
+	PRINT_FRAME_MARKER,
+	type PrintFrameConfig,
+} from "../print-frame.js";
 
 declare global {
 	interface Window {
@@ -30,7 +44,7 @@ declare global {
 
 /**
  * User configuration read once from `window.PaginateConfig` at script
- * evaluation.
+ * evaluation, or passed to `window.PaginatePrint.init` in print iframes.
  *
  * - `auto` — only the exact value `false` disables the automatic preview; any
  *   other value (absent, `undefined`, `0`, ...) auto-runs it.
@@ -43,15 +57,7 @@ declare global {
  * - `settings` — consumed only as the `Previewer` constructor argument; it is
  *   not forwarded to `preview(...)`.
  */
-export interface PaginateConfig {
-	auto?: boolean;
-	before?: () => void | Promise<void>;
-	after?: (result?: unknown) => void | Promise<void>;
-	content?: string | HTMLElement;
-	stylesheets?: Array<string | Record<string, string> | undefined>;
-	renderTo?: string | HTMLElement;
-	settings?: Record<string, unknown>;
-}
+export type PaginateConfig = PrintFrameConfig;
 
 // Publish the library's full API namespace synchronously, for debugging and
 // for external scripts.
@@ -83,42 +89,64 @@ const ready: Promise<string> = new Promise<string>((resolve) => {
 	}
 });
 
-// The user's configuration, read exactly once here: when `window.PaginateConfig`
-// is truthy, `config` IS that object (by reference — no copying, merging,
-// validation or mutation); otherwise a fresh default object is used.
-const config: PaginateConfig = window.PaginateConfig || { auto: true };
+/**
+ * The auto-run chain: await `before`, then auto-run the preview unless
+ * `auto` is exactly `false`, then await `after` with the preview result
+ * (`undefined` when the preview was skipped). No error handling: failures
+ * surface as unhandled promise rejections.
+ */
+const run = (config: PaginateConfig, previewer: Previewer): void => {
+	ready.then(async () => {
+		if (config.before) {
+			await config.before();
+		}
 
-// The single previewer instance for this script load, constructed with the
-// user's settings (possibly `undefined`).
-const previewer: Previewer = new Previewer(config.settings);
+		let done: unknown;
 
-// The same instance is the module's default export ...
+		if (config.auto !== false) {
+			done = await previewer.preview(
+				config.content,
+				config.stylesheets,
+				config.renderTo,
+			);
+		}
+
+		if (config.after) {
+			await config.after(done);
+		}
+	});
+};
+
+// The single previewer instance for this script load.
+let previewer: Previewer | undefined;
+
+if (window.name === PRINT_FRAME_MARKER) {
+	// Hidden print iframe created by printHTML(): defer to the parent page,
+	// which calls init() with the configuration once this bundle has loaded.
+	// The previewer is constructed here (lazily) so the settings reach the
+	// constructor.
+	window.PaginatePrint = {
+		init: (config: PaginateConfig): void => {
+			if (previewer) {
+				// init() runs at most once.
+				return;
+			}
+			previewer = new Previewer(config.settings);
+			window.PaginatePolyfill = previewer;
+			run(config, previewer);
+		},
+	};
+} else {
+	// The user's configuration, read exactly once here: when
+	// `window.PaginateConfig` is truthy, `config` IS that object (by
+	// reference — no copying, merging, validation or mutation); otherwise a
+	// fresh default object is used.
+	const config: PaginateConfig = window.PaginateConfig || { auto: true };
+	previewer = new Previewer(config.settings);
+	window.PaginatePolyfill = previewer;
+	run(config, previewer);
+}
+
+// The same instance is the module's default export. The binding is live, so
+// in print iframes the export updates when the parent page calls init().
 export default previewer;
-
-// ... and is published on the window, so callers can drive previews manually
-// or observe rendering events.
-window.PaginatePolyfill = previewer;
-
-// The auto-run chain: await `before`, then auto-run the preview unless
-// `auto` is exactly `false`, then await `after` with the preview result
-// (`undefined` when the preview was skipped). No error handling: failures
-// surface as unhandled promise rejections.
-ready.then(async () => {
-	if (config.before) {
-		await config.before();
-	}
-
-	let done: unknown;
-
-	if (config.auto !== false) {
-		done = await previewer.preview(
-			config.content,
-			config.stylesheets,
-			config.renderTo,
-		);
-	}
-
-	if (config.after) {
-		await config.after(done);
-	}
-});
